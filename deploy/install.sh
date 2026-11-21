@@ -62,6 +62,15 @@ create_user() {
   else
     log "用户 $SERVICE_USER 已存在"
   fi
+
+  # Reading journald requires membership of this group. Without it every log
+  # endpoint returns "insufficient permissions" and the UI looks broken.
+  if getent group systemd-journal >/dev/null 2>&1; then
+    usermod -aG systemd-journal "$SERVICE_USER"
+    log "已将 $SERVICE_USER 加入 systemd-journal 组（用于读取日志）"
+  else
+    warn "未找到 systemd-journal 组，日志功能可能不可用"
+  fi
 }
 
 install_files() {
@@ -90,6 +99,10 @@ build_frontend() {
 
 setup_config() {
   mkdir -p "$CONFIG_DIR" "$DATA_DIR"
+  # The service runs as $SERVICE_USER but reads config as root-owned. The
+  # directory must therefore belong to the service *group*, otherwise the
+  # process cannot even traverse into it and reports "password not set".
+  chown root:"$SERVICE_USER" "$CONFIG_DIR"
   chmod 750 "$CONFIG_DIR"
   chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 

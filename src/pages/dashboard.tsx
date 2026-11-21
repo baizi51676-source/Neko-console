@@ -79,7 +79,23 @@ export default function DashboardPage() {
   const { cpu, memory, disks, network, host } = overview;
   const totalRx = network.reduce((sum, iface) => sum + iface.rxRate, 0);
   const totalTx = network.reduce((sum, iface) => sum + iface.txRate, 0);
-  const worstDisk = disks.reduce((worst, disk) => (disk.percent > (worst?.percent ?? -1) ? disk : worst), disks[0]);
+
+  /*
+   * Pick the disk that matters for the headline KPI.
+   *
+   * Snap packages mount their squashfs images as loop devices under /snap/*,
+   * and those always read 100% used because the image is exactly its own size.
+   * Ranking by "fullest" without filtering them out made the dashboard show a
+   * permanent red 100% warning while the real root filesystem sat at 40%.
+   *
+   * So: drop loopback/squashfs mounts, then take the *most used* remaining disk
+   * (a full data volume is more urgent than the largest healthy one).
+   */
+  const realDisks = disks.filter((disk) => !/^\/(snap|var\/lib\/snapd)\b/.test(disk.mount));
+  const headlineDisk = realDisks.reduce(
+    (worst, disk) => (disk.percent > (worst?.percent ?? -1) ? disk : worst),
+    realDisks[0],
+  );
 
   return (
     <>
@@ -137,9 +153,9 @@ export default function DashboardPage() {
         <MetricCard
           icon={HardDrive}
           label="磁盘"
-          value={worstDisk ? formatPercent(worstDisk.percent) : '—'}
-          percent={worstDisk?.percent ?? 0}
-          detail={worstDisk ? `${formatBytes(worstDisk.used)} / ${formatBytes(worstDisk.size)}` : '无数据'}
+          value={headlineDisk ? formatPercent(headlineDisk.percent) : '—'}
+          percent={headlineDisk?.percent ?? 0}
+          detail={headlineDisk ? `${formatBytes(headlineDisk.used)} / ${formatBytes(headlineDisk.size)}` : '无数据'}
         />
         <MetricCard
           icon={Zap}
@@ -165,10 +181,10 @@ export default function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            {disks.length === 0 ? (
+            {realDisks.length === 0 ? (
               <EmptyState title="没有可显示的磁盘" description="未检测到块设备挂载点。" />
             ) : (
-              disks.map((disk) => (
+              realDisks.map((disk) => (
                 <div key={disk.mount}>
                   <div className="mb-1 flex items-baseline justify-between gap-2 text-[12px]">
                     <span className="truncate font-medium">{disk.mount}</span>

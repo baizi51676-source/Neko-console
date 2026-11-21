@@ -197,13 +197,14 @@ Caddy 的 `flush_interval -1` 等价于关闭缓冲，SSE 才能实时。
 
 | 现象 | 排查 |
 |---|---|
-| 启动即退出，提示「尚未设置管理员密码」 | 未生成配置：`sudo NEKO_CONFIG_DIR=/etc/neko-console node server/init.mjs` |
+| 启动即退出，提示「尚未设置管理员密码」 | 配置没被读到。检查 `/etc/neko-console` 的**属组**：服务以 `neko` 运行，目录必须是 `root:neko` 且权限 `750`，文件 `root:neko 640`。若目录是 `root:root 750`，进程连 `cd` 进去都做不到，只会看到「未设置密码」。修复：`sudo chown root:neko /etc/neko-console /etc/neko-console/config.json` |
+| 日志页空白 / 提示 journald 不可用 | `neko` 用户不在 `systemd-journal` 组。修复：`sudo usermod -aG systemd-journal neko && sudo systemctl restart neko-console` |
 | 打开页面 404 / 白屏 | 前端未构建：`cd /opt/neko-console && npm run build` |
 | 页面能开但一直显示「正在连接服务器…」 | 反代未关闭 buffering，或 Cookie 的 `Secure` 与 HTTP 访问不匹配 |
 | 指标不动、图表空白 | 打开浏览器控制台看 `/api/stream` 是否 401；再看 `journalctl -u neko-console` |
 | 服务启停报「Access denied」 | polkit 规则未生效：确认文件位置，并 `systemctl reload polkit` |
 | 登录后立刻掉线 | 若走 HTTP 且配置了 TLS 证书，Cookie 带 `Secure` 会被丢弃；改用 HTTPS 或去掉证书配置 |
-| 日志页空白 | 非 systemd 系统或 journald 未启用；改用「日志文件」来源 |
+| 磁盘显示 100% 但实际没满 | 已修复：`/snap/*` 的 loopback 挂载会被过滤。若仍异常，检查是否有其他 squashfs 挂载 |
 
 查看服务日志：
 
