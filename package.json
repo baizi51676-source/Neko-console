@@ -1,0 +1,49 @@
+{
+  "name": "neko-console",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "description": "Neko-console - a lightweight, zero-dependency web console for Linux servers: metrics, processes, systemd services, logs and files.",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "server",
+    "console",
+    "monitoring",
+    "systemd",
+    "linux",
+    "react",
+    "tailwindcss"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baizi51676-source/neko-console.git"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/main.mjs",
+    "init": "node server/init.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.72.0",
+    "motion": "^14.13.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}

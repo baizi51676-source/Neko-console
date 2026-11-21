@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Verify server modules parse
+        run: |
+          for file in $(find server scripts -name '*.mjs'); do
+            node --check "$file"
+          done
+
+      # The API smoke test boots the real server and exercises every route,
+      # including the path-traversal and command-injection guards. It runs on
+      # Linux so the /proc collectors are covered for real.
+      - name: API smoke test
+        run: node scripts/smoke-test.mjs
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
