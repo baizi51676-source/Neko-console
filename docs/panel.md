@@ -170,6 +170,24 @@ systemctl list-timers neko-cert-renew.timer
 面板只做**巡检**（读取 `notAfter`，剩余天数 ≤14 天报警），不触发续期 ——
 刷个页面不应该产生副作用。
 
+### 4.3 验证状态
+
+已用自签证书完整验证的路径：
+
+| 项目 | 状态 |
+|---|---|
+| 从 `fullchain.pem` 解析到期日 / 签发日 / SAN | ✅ |
+| 剩余天数计算 | ✅ 20 天证书算出 18–21 |
+| 14 天告警阈值 | ✅ 5 天证书正确标记 `expiringSoon` |
+| 已过期判定 | ✅ |
+| 列表按最近到期排序 | ✅ |
+| 巡检动作 `ssl.renew-check` 输出 | ✅ 含证书数与告警数 |
+| 非法域名拒绝（含 `--evil.com` 注入尝试） | ✅ |
+
+**未验证**：完整的 Let's Encrypt HTTP-01 签发流程。测试机在 NAT 后
+（公网 103.236.99.216，网卡 172.16.0.25），没有域名解析到它，无法完成
+ACME 校验。逻辑已就绪，但「真实签发」这一步需要你自己的域名才能确认。
+
 ---
 
 ## 五、数据库管理（M2）
@@ -184,10 +202,43 @@ systemctl list-timers neko-cert-renew.timer
 **不做**表结构浏览、SQL 执行、导入导出。需要这些请用 phpMyAdmin（约 50 MB）
 或 pgAdmin —— 把一个 SQL 控制台放在 Web 登录后面，攻击面比整个面板都大。
 
-### 5.2 密码不落库
+### 5.2 PostgreSQL 的隔离（重要）
 
-密码在 Node 侧生成，通过辅助程序传给 MySQL，然后**只在响应里返回一次**。
+MySQL 侧很直接：账号只被 `GRANT` 到自己那个库。PostgreSQL 侧有个默认行为需要
+显式处理。
+
+PostgreSQL 给**每个数据库**的 `PUBLIC` 授予 `CONNECT`。所以一个刚创建的角色能连上
+任何已有数据库 —— 包括 `postgres` 和 `template1`。
+
+更麻烦的是：`REVOKE CONNECT ON DATABASE x FROM <角色>` 对**通过 PUBLIC 获得的权限
+无效**。第一次实现就踩了这个坑：SQL 执行成功，权限却毫无变化。
+
+正确做法是撤销 `PUBLIC` 的 `CONNECT`，再单独授权给需要的角色：
+
+```sql
+REVOKE CONNECT ON DATABASE postgres  FROM PUBLIC;
+REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;
+-- 把权限还给集群里原有的非 pg_ 角色，避免把运维锁在门外
+GRANT CONNECT ON DATABASE postgres TO <原有角色>;
+```
+
+面板在创建数据库后做这件事，并且**在返回成功前用 `has_database_privilege` 校验**。
+如果没生效就直接报错，而不是让 UI 看起来正常、实际存在越权。
+
+> 顺带一个坑：`has_database_privilege(...)::text` 返回的是 `true`/`false`，
+> 不是 `t`/`f`。按 `t`/`f` 比较会让校验永远失败，并且报出误导性的
+> 「无法收紧权限」—— 这个 bug 自己拦住了一次本已正确的实现。
+
+### 5.3 密码不落库
+
+密码在 Node 侧生成，通过辅助程序传给数据库，然后**只在响应里返回一次**。
 控制台的 SQLite 里没有任何数据库密码。丢了就重置，面板无法帮你找回。
+
+### 5.4 备份
+
+`mysqldump --single-transaction` / `pg_dump --no-owner --clean --if-exists`，
+压缩后记录 SHA-256。全量备份会**自动发现两个引擎**的所有数据库，不需要你在面板里
+逐个登记。
 
 ---
 
