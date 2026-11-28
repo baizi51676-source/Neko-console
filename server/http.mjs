@@ -43,6 +43,8 @@ import {
   streamFile,
   writeTextFile,
 } from './collectors/files.mjs';
+import { ApiError, toApiError } from './errors.mjs';
+import { registerDockerRoutes } from './routes/docker.mjs';
 import { errorMessage, isSafeToken } from './util.mjs';
 
 const COOKIE_NAME = 'neko_session';
@@ -104,8 +106,19 @@ function sendOk(res, data = {}) {
   sendJson(res, 200, { ok: true, data });
 }
 
-function sendError(res, status, message) {
-  sendJson(res, status, { ok: false, error: message });
+/**
+ * Send a coded error.
+ *
+ * `code` is stable and safe to branch on; `detail` carries the raw cause for
+ * the UI to reveal on demand (docker stderr, for instance).
+ */
+function sendError(res, status, message, code, detail) {
+  sendJson(res, status, {
+    ok: false,
+    error: message,
+    ...(code ? { code } : {}),
+    ...(detail ? { detail } : {}),
+  });
 }
 
 /** Read and parse a JSON body with a hard size cap. */
@@ -162,7 +175,7 @@ route('POST', '/api/auth/login', async ({ req, res, config, body }) => {
   const ip = clientIp(req);
   const block = isBlocked(ip);
   if (block.blocked) {
-    sendError(res, 429, `尝试过于频繁，请在 ${block.retryAfter} 秒后重试`);
+    sendError(res, 429, `尝试过于频繁，请在 ${block.retryAfter} 秒后重试`, 'AUTH_THROTTLED');
     return;
   }
 
@@ -171,7 +184,7 @@ route('POST', '/api/auth/login', async ({ req, res, config, body }) => {
   const password = typeof payload.password === 'string' ? payload.password : '';
 
   if (!username || !password) {
-    sendError(res, 400, '请输入用户名和密码');
+    sendError(res, 400, '请输入用户名和密码', 'AUTH_MISSING_FIELDS');
     return;
   }
 
@@ -183,8 +196,9 @@ route('POST', '/api/auth/login', async ({ req, res, config, body }) => {
     const result = registerFailure(ip, config.loginMaxAttempts, config.loginWindow);
     sendError(
       res,
-      401,
+      result.blocked ? 429 : 401,
       result.blocked ? `尝试次数过多，已锁定 ${result.retryAfter} 秒` : '用户名或密码错误',
+      result.blocked ? 'AUTH_THROTTLED' : 'AUTH_INVALID_CREDENTIALS',
     );
     return;
   }
@@ -249,7 +263,7 @@ route('GET', '/api/processes', async ({ res }) => {
 route('GET', '/api/processes/detail', async ({ res, url }) => {
   const pid = Number(url.searchParams.get('pid'));
   if (!Number.isInteger(pid) || pid <= 0) {
-    sendError(res, 400, '无效的 PID');
+    sendError(res, 400, '无效的 PID', 'VALIDATION_BAD_PID');
     return;
   }
   sendOk(res, await getProcessDetail(pid));
@@ -316,12 +330,12 @@ route('GET', '/api/files/download', async ({ req, res, url, config }) => {
 route('POST', '/api/files/upload', async ({ req, res, url, config }) => {
   const target = url.searchParams.get('path') ?? '';
   if (!target) {
-    sendError(res, 400, '缺少目标路径');
+    sendError(res, 400, '缺少目标路径', 'VALIDATION_BAD_PATH');
     return;
   }
   const declared = Number(req.headers['content-length'] ?? 0);
   if (declared > 512 * 1024 * 1024) {
-    sendError(res, 413, '文件超过 512 MB 上限');
+    sendError(res, 413, '文件超过 512 MB 上限', 'FS_TOO_LARGE');
     return;
   }
   sendOk(res, await receiveUpload(config.fileRoot, target, req));
@@ -359,7 +373,7 @@ async function serveStatic(req, res, config) {
 
   // Refuse traversal outside the static root.
   if (filePath !== config.staticRoot && !filePath.startsWith(config.staticRoot + sep)) {
-    sendError(res, 403, 'forbidden');
+    sendError(res, 403, '路径超出允许范围', 'FS_ESCAPE');
     return;
   }
 
@@ -372,7 +386,7 @@ async function serveStatic(req, res, config) {
     filePath = join(config.staticRoot, 'index.html');
     info = await stat(filePath).catch(() => null);
     if (!info?.isFile()) {
-      sendError(res, 404, '前端尚未构建，请先运行 npm run build');
+      sendError(res, 404, '前端尚未构建，请先运行 npm run build', 'NOTFOUND_FILE');
       return;
     }
   }
@@ -489,9 +503,24 @@ const PUBLIC_PATHS = new Set(['/api/auth/login', '/api/auth/logout', '/api/auth/
  * @param {import('./config.mjs').Config} options.config
  * @param {{ ensureRunning: () => void }} options.stream
  */
+/**
+ * Audit log.
+ *
+ * State-changing actions are written to the journal with a `[neko]` prefix so
+ * they survive in `journalctl -u neko-console` even if the console itself is
+ * later compromised or removed. This is the console's only durable record of
+ * who restarted what.
+ */
+function auditLog(line) {
+  console.log(`[neko] ${new Date().toISOString()} ${line}`);
+}
+
 export function createHandler({ config, stream }) {
   // Periodic sweep keeps the login-throttle map bounded.
   setInterval(() => sweepAttempts(config.loginWindow), 60_000).unref();
+
+  // Docker / catalogue / power routes are registered once per handler.
+  registerDockerRoutes(route, { config, log: auditLog });
 
   return async function handle(req, res) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -513,7 +542,7 @@ export function createHandler({ config, stream }) {
       const token = parseCookies(req)[COOKIE_NAME];
       const session = verifySession(token, config.sessionSecret);
       if (!session) {
-        sendError(res, 401, '未登录或登录已过期');
+        sendError(res, 401, '未登录或登录已过期', 'AUTH_REQUIRED');
         return;
       }
     }
@@ -526,20 +555,23 @@ export function createHandler({ config, stream }) {
 
     const handler = routes.get(`${method} ${path}`);
     if (!handler) {
-      sendError(res, 404, `未知接口 ${method} ${path}`);
+      sendError(res, 404, `未知接口 ${method} ${path}`, 'NOTFOUND_ROUTE');
       return;
     }
 
     try {
-      await handler({ req, res, url, config, body: () => readJsonBody(req) });
+      await handler({ req, res, url, config, body: () => readJsonBody(req), sendOk });
     } catch (error) {
-      const message = errorMessage(error);
-      // 4xx for expected validation failures, 500 otherwise; the message is
-      // surfaced because this is a single-admin tool where it is actionable.
-      const status = /无效|不允许|超出|过大|必须|不存在/.test(message) ? 400 : 500;
-      if (status === 500) console.error(`[neko] ${method} ${path} 失败:`, message);
-      if (!res.headersSent) sendError(res, status, message);
-      else res.end();
+      // Status and code come from the taxonomy, never from string matching.
+      const apiError = toApiError(error);
+      if (apiError.status >= 500) {
+        console.error(`[neko] ${method} ${path} → ${apiError.code}:`, apiError.detail ?? apiError.message);
+      }
+      if (!res.headersSent) {
+        sendError(res, apiError.status, apiError.message, apiError.code, apiError.detail);
+      } else {
+        res.end();
+      }
     }
   };
 }

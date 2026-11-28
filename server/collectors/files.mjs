@@ -11,6 +11,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { ApiError } from '../errors.mjs';
 import { resolveWithin } from '../util.mjs';
 
 /** Refuse to open files larger than this in the editor. */
@@ -41,13 +42,13 @@ const TEXT_EXTENSIONS = new Set([
 async function safePath(root, requested) {
   const realRoot = await realpath(root).catch(() => resolve(root));
   const lexical = resolveWithin(root, requested);
-  if (!lexical) throw new Error('路径超出允许范围');
+  if (!lexical) throw new ApiError('FS_ESCAPE');
 
   // Fast path: the target exists, so its real location is authoritative.
   const existing = await realpath(lexical).catch(() => null);
   if (existing) {
     if (existing !== realRoot && !existing.startsWith(realRoot + sep)) {
-      throw new Error('路径超出允许范围（符号链接指向外部）');
+      throw new ApiError('FS_ESCAPE', '路径超出允许范围（符号链接指向外部）');
     }
     return existing;
   }
@@ -58,7 +59,7 @@ async function safePath(root, requested) {
     const real = await realpath(ancestor).catch(() => null);
     if (real) {
       if (real !== realRoot && !real.startsWith(realRoot + sep)) {
-        throw new Error('路径超出允许范围（符号链接指向外部）');
+        throw new ApiError('FS_ESCAPE', '路径超出允许范围（符号链接指向外部）');
       }
       // The remainder below `ancestor` does not exist yet; it is about to be
       // created, so it cannot itself be a symlink.
@@ -68,7 +69,7 @@ async function safePath(root, requested) {
     if (parent === ancestor) break;
     ancestor = parent;
   }
-  throw new Error('目标路径不可用');
+  throw new ApiError('VALIDATION_BAD_PATH', '目标路径不可用');
 }
 
 /**
@@ -80,7 +81,7 @@ async function safePath(root, requested) {
 export async function listDirectory(root, requested) {
   const target = await safePath(root, requested);
   const info = await stat(target);
-  if (!info.isDirectory()) throw new Error('不是目录');
+  if (!info.isDirectory()) throw new ApiError('FS_NOT_A_DIRECTORY');
 
   const entries = await readdir(target, { withFileTypes: true });
   const items = await Promise.all(
@@ -126,8 +127,10 @@ export async function listDirectory(root, requested) {
 export async function readTextFile(root, requested) {
   const target = await safePath(root, requested);
   const info = await stat(target);
-  if (!info.isFile()) throw new Error('不是文件');
-  if (info.size > MAX_EDIT_BYTES) throw new Error(`文件过大（上限 ${MAX_EDIT_BYTES / 1024 / 1024} MB）`);
+  if (!info.isFile()) throw new ApiError('FS_NOT_A_FILE');
+  if (info.size > MAX_EDIT_BYTES) {
+    throw new ApiError('FS_TOO_LARGE', `文件过大（上限 ${MAX_EDIT_BYTES / 1024 / 1024} MB）`);
+  }
 
   const extension = extname(target).toLowerCase();
   const looksTextual = TEXT_EXTENSIONS.has(extension) || extension === '';
@@ -145,8 +148,8 @@ export async function readTextFile(root, requested) {
 
 /** Overwrite a text file. */
 export async function writeTextFile(root, requested, content) {
-  if (typeof content !== 'string') throw new Error('内容必须是文本');
-  if (Buffer.byteLength(content, 'utf8') > MAX_EDIT_BYTES) throw new Error('内容过大');
+  if (typeof content !== 'string') throw new ApiError('VALIDATION_FAILED', '内容必须是文本');
+  if (Buffer.byteLength(content, 'utf8') > MAX_EDIT_BYTES) throw new ApiError('FS_TOO_LARGE', '内容过大');
   const target = await safePath(root, requested);
   await writeFile(target, content, 'utf8');
   return { ok: true, size: Buffer.byteLength(content, 'utf8') };
@@ -165,7 +168,7 @@ export async function writeTextFile(root, requested, content) {
 export async function streamFile(root, requested, res) {
   const target = await safePath(root, requested);
   const info = await stat(target);
-  if (!info.isFile()) throw new Error('不是文件');
+  if (!info.isFile()) throw new ApiError('FS_NOT_A_FILE');
 
   res.writeHead(200, {
     'content-type': 'application/octet-stream',
@@ -212,7 +215,7 @@ export async function removePath(root, requested) {
   const target = await safePath(root, requested);
   const realRoot = await realpath(root).catch(() => resolve(root));
   // Never allow deleting the root itself.
-  if (target === realRoot) throw new Error('不能删除根目录');
+  if (target === realRoot) throw new ApiError('FS_ROOT_DELETE');
   const info = await stat(target);
   await rm(target, { recursive: info.isDirectory(), force: false });
   return { ok: true };

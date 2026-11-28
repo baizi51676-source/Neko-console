@@ -14,9 +14,11 @@
 import { lazy, type ComponentType, type LazyExoticComponent } from 'react';
 import {
   Activity,
+  Boxes,
   FileText,
   FolderTree,
   LayoutDashboard,
+  PackagePlus,
   Settings2,
   SlidersHorizontal,
   type LucideIcon,
@@ -61,6 +63,27 @@ export const NAV: NavGroup[] = [
         icon: Activity,
         primary: true,
         component: page(() => import('@/pages/processes')),
+      },
+    ],
+  },
+  {
+    group: '容器',
+    items: [
+      {
+        id: 'docker',
+        label: 'Docker',
+        description: '容器、镜像、数据卷与 Compose 项目的状态与操作。',
+        icon: Boxes,
+        primary: true,
+        component: page(() => import('@/pages/docker')),
+      },
+      {
+        id: 'install',
+        label: '一键安装',
+        description: '从模板部署常用应用，支持 Docker Hub 与国内镜像源。',
+        icon: PackagePlus,
+        primary: true,
+        component: page(() => import('@/pages/install')),
       },
     ],
   },

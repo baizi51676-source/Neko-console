@@ -165,6 +165,70 @@ async function main() {
     res = await call('/api/unknown/route');
     check('未知路由返回 404', res.status === 404);
 
+
+    console.log('\nDocker 与电源');
+    res = await call('/api/docker/status');
+    check('docker/status 返回 200', res.status === 200, `got ${res.status}`);
+    check('docker/status 结构完整', res.json?.data && typeof res.json.data.available === 'boolean');
+    check('无 docker 时返回 reason', res.json?.data?.available === true || typeof res.json?.data?.reason === 'string');
+
+    res = await call('/api/docker/catalog');
+    check('catalog 返回模板', res.json?.ok && Array.isArray(res.json?.data?.templates));
+    check('catalog 含 12 个模板', res.json?.data?.templates?.length === 12, `got ${res.json?.data?.templates?.length}`);
+    check('catalog 含 4 个镜像源', res.json?.data?.sources?.length === 4);
+    check('镜像源含国内加速', res.json?.data?.sources?.some((source) => source.imagePrefix.length > 0));
+
+    res = await call('/api/docker/projects');
+    check('projects 返回 200', res.status === 200);
+
+    res = await call('/api/power');
+    check('power 返回能力信息', res.json?.ok && typeof res.json?.data?.available === 'boolean');
+    check('power 倒计时已配置', res.json?.data?.countdown > 0);
+
+    res = await call('/api/power', { method: 'POST', body: JSON.stringify({ action: 'reboot' }) });
+    check('拒绝无密码的重启', res.status >= 400 || res.json?.ok === false);
+
+    res = await call('/api/power', { method: 'POST', body: JSON.stringify({ action: 'reboot', password: 'wrong' }) });
+    check('拒绝错误密码的重启', res.status >= 400 || res.json?.ok === false);
+
+    res = await call('/api/power', { method: 'POST', body: JSON.stringify({ action: 'launch-missiles', password: PASS }) });
+    check('拒绝非法电源操作', res.status >= 400 || res.json?.ok === false);
+
+    res = await call('/api/docker/deploy', { method: 'POST', body: JSON.stringify({ mode: 'run', spec: { name: 'Bad Name!', image: 'x' } }) });
+    check('拒绝非法容器名部署', res.status >= 400 || res.json?.ok === false);
+
+    res = await call('/api/docker/deploy', { method: 'POST', body: JSON.stringify({ mode: 'run', spec: { name: 'ok', image: 'nginx', volumes: [{ host: '../../etc', container: '/x' }] } }) });
+    check('拒绝越界挂载路径', res.status >= 400 || res.json?.ok === false);
+
+    res = await call('/api/docker/action', { method: 'POST', body: JSON.stringify({ name: 'x; rm -rf /', action: 'stop' }) });
+    check('拒绝命令注入的容器名', res.status >= 400 || res.json?.ok === false);
+
+    console.log('\n错误码');
+    res = await call('/api/docker/action', { method: 'POST', body: JSON.stringify({ name: 'x; rm -rf /', action: 'stop' }) });
+    check('非法容器名返回 VALIDATION_BAD_NAME', res.json?.code === 'VALIDATION_BAD_NAME', `got ${res.json?.code}`);
+
+    res = await call('/api/docker/action', { method: 'POST', body: JSON.stringify({ name: 'ok', action: 'format-disk' }) });
+    check('非法动作返回 VALIDATION_BAD_ACTION', res.json?.code === 'VALIDATION_BAD_ACTION', `got ${res.json?.code}`);
+
+    res = await call('/api/files/read?path=../../etc/passwd');
+    check('路径穿越返回 FS_ESCAPE', res.json?.code === 'FS_ESCAPE', `got ${res.json?.code}`);
+
+    res = await call('/api/power', { method: 'POST', body: JSON.stringify({ action: 'reboot' }) });
+    check('电源操作返回可分类错误码', typeof res.json?.code === 'string', `got ${res.json?.code}`);
+
+    res = await call('/api/unknown/route');
+    check('未知路由返回 NOTFOUND_ROUTE', res.json?.code === 'NOTFOUND_ROUTE', `got ${res.json?.code}`);
+
+    res = await call('/api/docker/deploy', { method: 'POST', body: JSON.stringify({ mode: 'run', templateId: 'nope', spec: { name: 'x', image: 'y' } }) });
+    check('未知模板返回 NOTFOUND_TEMPLATE', res.json?.code === 'NOTFOUND_TEMPLATE', `got ${res.json?.code}`);
+
+    res = await call('/api/processes/detail?pid=abc');
+    check('非法 PID 返回 VALIDATION_BAD_PID', res.json?.code === 'VALIDATION_BAD_PID', `got ${res.json?.code}`);
+
+    console.log('\n错误码格式');
+    res = await call('/api/files/read?path=../../etc/passwd');
+    check('错误响应包含 ok/code/error', res.json?.ok === false && typeof res.json?.code === 'string' && typeof res.json?.error === 'string');
+    check('错误响应不泄露堆栈', !res.json?.detail?.includes?.('at ') && !JSON.stringify(res.json).includes('stack'));
     console.log('\n登出');
     res = await call('/api/auth/logout', { method: 'POST' });
     check('登出返回 200', res.json?.ok === true);

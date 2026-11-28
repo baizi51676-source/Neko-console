@@ -12,7 +12,14 @@
  */
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Stable machine code (e.g. `DOCKER_PORT_CONFLICT`); branch on this. */
+    readonly code?: string,
+    /** Raw upstream cause (docker stderr, validation hint) for disclosure. */
+    readonly detail?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -30,6 +37,8 @@ interface Envelope<T> {
   ok: boolean;
   data?: T;
   error?: string;
+  code?: string;
+  detail?: string;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -52,7 +61,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok || !payload.ok) {
-    throw new ApiError(payload.error ?? `请求失败（HTTP ${response.status}）`, response.status);
+    throw new ApiError(
+      payload.error ?? `请求失败（HTTP ${response.status}）`,
+      response.status,
+      payload.code,
+      payload.detail,
+    );
   }
   return payload.data as T;
 }
@@ -262,3 +276,162 @@ export function subscribeMetrics(
 
   return () => source.close();
 }
+
+/* ------------------------------------------------------------------ */
+/* docker                                                              */
+/* ------------------------------------------------------------------ */
+
+export interface ContainerStats {
+  cpu: number;
+  memory: number;
+  memoryPercent: number;
+  net: string;
+  block: string;
+  pids: number;
+}
+
+export interface ContainerPort {
+  containerPort: number;
+  hostPort: number | null;
+  hostIp: string | null;
+  protocol: string;
+}
+
+export interface ContainerMount {
+  type: string;
+  source: string;
+  destination: string;
+  mode: string;
+}
+
+export interface Container {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  runningFor: string;
+  ports: string;
+  composeProject: string | null;
+  composeService: string | null;
+  health?: string | null;
+  restartPolicy?: string;
+  portsDetailed?: ContainerPort[];
+  mounts?: ContainerMount[];
+  env?: { key: string; value: string }[];
+  command?: string;
+  stats?: ContainerStats | null;
+}
+
+export interface DockerStack {
+  name: string;
+  running: number;
+  total: number;
+  services: { name: string; container: string; state: string; status: string }[];
+  workingDir: string | null;
+  configFile: string | null;
+}
+
+export interface DockerStatus {
+  available: boolean;
+  reason?: string;
+  version?: string;
+  compose?: string | null;
+  containers: Container[];
+  stacks: DockerStack[];
+  images: { id: string; repository: string; tag: string; size: string; createdSince: string }[];
+  volumes: { name: string; driver: string; mountpoint: string }[];
+  networks: { id: string; name: string; driver: string; scope: string }[];
+  usage: Record<string, unknown>[] | null;
+}
+
+export interface RegistrySource {
+  id: string;
+  label: string;
+  hint: string;
+  imagePrefix: string;
+}
+
+export interface TemplatePort {
+  host: number;
+  container: number;
+  protocol?: string;
+  label?: string;
+}
+
+export interface TemplateVariable {
+  key: string;
+  label: string;
+  default?: string;
+  secret?: boolean;
+  required?: boolean;
+  hint?: string;
+}
+
+export interface AppTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  image: string;
+  ports: TemplatePort[];
+  volumes: { host: string; container: string; readOnly?: boolean }[];
+  env: TemplateVariable[];
+  extraArgs?: string[];
+  homepage?: string;
+  docs?: string;
+  note?: string;
+}
+
+export interface DeployResult {
+  mode: 'run' | 'compose';
+  name: string;
+  image: string;
+  command?: string;
+  file?: string;
+  yaml?: string;
+  pullOutput?: string;
+  output?: string;
+  containerId?: string;
+}
+
+export interface PowerState {
+  available: boolean;
+  canReboot: boolean;
+  canShutdown: boolean;
+  countdown: number;
+  reason?: string;
+  pending: { token: string; action: string; firesAt: number; remaining: number }[];
+}
+
+export interface PowerSchedule {
+  token: string;
+  action: string;
+  firesAt: number;
+  countdown: number;
+  message: string;
+}
+
+export const dockerApi = {
+  status: () => get<DockerStatus>('/api/docker/status'),
+  containers: () => get<{ containers: Container[] }>('/api/docker/containers'),
+  logs: (name: string, lines = 300) =>
+    get<{ available: boolean; lines: { index: number; raw: string }[] }>(
+      `/api/docker/logs?name=${encodeURIComponent(name)}&lines=${lines}`,
+    ),
+  action: (name: string, action: string) => post<{ action: string; name: string }>('/api/docker/action', { name, action }),
+  remove: (name: string, force = false) => post<{ name: string }>('/api/docker/remove', { name, force }),
+  stack: (name: string, action: string) => post<{ ok: boolean; output?: string }>('/api/docker/stack', { name, action }),
+  catalog: () => get<{ templates: AppTemplate[]; sources: RegistrySource[] }>('/api/docker/catalog'),
+  deploy: (payload: Record<string, unknown>) => post<DeployResult>('/api/docker/deploy', payload),
+  projects: () => get<{ projects: { name: string; file: string }[] }>('/api/docker/projects'),
+  project: (name: string) => get<{ name: string; file: string; yaml: string }>(`/api/docker/project?name=${encodeURIComponent(name)}`),
+  saveProject: (name: string, yaml: string) => post<{ ok: boolean; file: string }>('/api/docker/project', { name, yaml }),
+};
+
+export const powerApi = {
+  state: () => get<PowerState>('/api/power'),
+  schedule: (action: 'reboot' | 'shutdown', password: string) =>
+    post<PowerSchedule>('/api/power', { action, password }),
+  cancel: (token: string) => post<{ cancelled: boolean }>('/api/power/cancel', { token }),
+};

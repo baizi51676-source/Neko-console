@@ -7,6 +7,7 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { hasBinary, isSafeToken, stripAnsi, tryRun } from '../util.mjs';
+import { ApiError } from '../errors.mjs';
 
 /* ------------------------------------------------------------------ */
 /* services                                                            */
@@ -73,17 +74,17 @@ export async function getServices(force = false) {
 const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart', 'reload', 'enable', 'disable']);
 
 export async function controlService(action, unit) {
-  if (!ALLOWED_ACTIONS.has(action)) throw new Error(`不支持的操作: ${action}`);
-  if (!isSafeToken(unit, /^[A-Za-z0-9@._:+-]{1,200}$/)) throw new Error('无效的服务名');
+  if (!ALLOWED_ACTIONS.has(action)) throw new ApiError('VALIDATION_BAD_ACTION', `不支持的操作: ${action}`);
+  if (!isSafeToken(unit, /^[A-Za-z0-9@._:+-]{1,200}$/)) throw new ApiError('VALIDATION_BAD_NAME', '无效的服务名');
   const out = await tryRun('systemctl', [action, `${unit}.service`], { timeout: 20000 });
-  if (out === null) throw new Error(`systemctl ${action} ${unit} 执行失败（可能缺少权限）`);
+  if (out === null) throw new ApiError('DOCKER_ACTION_FAILED', `systemctl ${action} ${unit} 执行失败（可能缺少权限）`);
   unitsCache.at = 0; // invalidate so the next poll sees the new state
   return { ok: true };
 }
 
 /** Journal lines for one unit, newest last. */
 export async function getServiceLogs(unit, lines = 200) {
-  if (!isSafeToken(unit, /^[A-Za-z0-9@._:+-]{1,200}$/)) throw new Error('无效的服务名');
+  if (!isSafeToken(unit, /^[A-Za-z0-9@._:+-]{1,200}$/)) throw new ApiError('VALIDATION_BAD_NAME', '无效的服务名');
   if (!hasBinary('journalctl')) return { available: false, lines: [] };
   const count = Math.min(2000, Math.max(1, Number(lines) || 200));
   const out = await tryRun(
@@ -129,7 +130,7 @@ export function parseLogLines(text) {
 /** Read the tail of a system log file. */
 export async function getSystemLog(path, lines = 300) {
   const SAFE_PATHS = ['/var/log/syslog', '/var/log/messages', '/var/log/kern.log', '/var/log/auth.log', '/var/log/dmesg'];
-  if (!SAFE_PATHS.includes(path)) throw new Error('不允许读取该日志文件');
+  if (!SAFE_PATHS.includes(path)) throw new ApiError('FS_LOG_FORBIDDEN', '不允许读取该日志文件');
   const count = Math.min(5000, Math.max(1, Number(lines) || 300));
 
   const info = await stat(path).catch(() => null);

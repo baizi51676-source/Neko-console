@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { BrandMark } from './brand-mark';
 import { WallpaperLayer } from './wallpaper-layer';
 import { useSession } from './session';
+import { PowerMenu } from './power-menu';
 
 /** Easing shared by every shell animation, so nothing feels out of family. */
 const EASE = [0.16, 1, 0.3, 1] as const;
@@ -313,6 +314,15 @@ function SidebarTools({
       {tools.map((tool) =>
         tool.id === 'theme' ? (
           <ThemeToggle key={tool.id} isDark={isDark} onToggle={onThemeToggle} />
+        ) : tool.id === 'logout' ? (
+          // Power control sits beside logout: both are destructive and belong at
+          // the very bottom of the sidebar, away from daily use.
+          <span key={tool.id} className="flex items-center gap-0.5">
+            <PowerMenu />
+            <Button variant="ghost" size="icon" aria-label={tool.label} title={tool.label} onClick={tool.onClick}>
+              {tool.icon}
+            </Button>
+          </span>
         ) : (
           <Button key={tool.id} variant="ghost" size="icon" aria-label={tool.label} title={tool.label} onClick={tool.onClick}>
             {tool.icon}

@@ -211,3 +211,79 @@ Caddy 的 `flush_interval -1` 等价于关闭缓冲，SSE 才能实时。
 ```sh
 journalctl -u neko-console -n 100 --no-pager
 ```
+
+---
+
+## 七、Docker 与电源功能
+
+### 7.1 授权 Docker 访问
+
+控制台以 `neko` 用户运行，需要加入 `docker` 组才能读写容器：
+
+```sh
+sudo usermod -aG docker neko
+sudo systemctl restart neko-console      # 组成员变更需重启进程
+```
+
+验证：`sudo -u neko docker ps` 应能列出容器。
+
+### 7.2 systemd 沙箱与 HOME
+
+`neko-console.service` 启用了 `ProtectHome=true`，这会隐藏 `/home`。而 Docker CLI 需要读取
+`$HOME/.docker/config.json`，否则报：
+
+```
+WARNING: Error loading config file: open /home/neko/.docker/config.json: permission denied
+unknown shorthand flag: 'f' in -f
+```
+
+因此 unit 里显式把 `HOME` 指向一个可写路径：
+
+```ini
+Environment=HOME=/var/lib/neko-console/home
+```
+
+对应目录需存在并属于服务用户：
+
+```sh
+sudo mkdir -p /var/lib/neko-console/home/.docker
+sudo chown -R neko:neko /var/lib/neko-console/home
+```
+
+> 这是实际部署中踩到的坑：`docker info` 单独执行正常，但在沙箱内就会因为读不到配置而
+> 让所有 `docker compose` 命令失败，错误信息还指向「权限不足」，容易误判。
+
+### 7.3 一键安装的镜像源
+
+面板提供四个源，仅替换镜像名的 registry 前缀，模板元数据始终指向上游：
+
+| 源 | 前缀 |
+|---|---|
+| GitHub 直链 / 官方 | （无，直连 Docker Hub） |
+| Docker Proxy | `dockerproxy.net/` |
+| 1Panel 镜像 | `docker.1panel.live/` |
+| DaoCloud | `docker.m.daocloud.io/` |
+
+生成的 compose 项目存放于 `/var/lib/neko-console/stacks/<项目名>/docker-compose.yml`，
+可在面板内编辑并重新 apply。
+
+### 7.4 电源操作的防护
+
+重启/关机需要**重新输入账号密码**，而不只是点击确认：
+
+- 已登录的会话 cookie 不足以关机，避免会话被盗后变成拒绝服务
+- 操作后进入 20 秒倒计时，期间可在侧边栏取消
+- 有未完成的 systemd 任务时直接拒绝
+- 动作执行前写入 journal，便于事后审计
+
+### 7.5 错误码
+
+所有 API 错误返回稳定机器码，便于脚本判断：
+
+```json
+{ "ok": false, "error": "宿主端口已被占用，请改用其他端口", "code": "DOCKER_PORT_CONFLICT", "detail": "..." }
+```
+
+常用码：`AUTH_REQUIRED`、`VALIDATION_BAD_NAME`、`DOCKER_PORT_CONFLICT`、
+`DOCKER_IMAGE_UNAVAILABLE`、`DOCKER_NO_PERMISSION`、`FS_ESCAPE`、`POWER_UNAVAILABLE`。
+完整列表见 `server/errors.mjs`。
