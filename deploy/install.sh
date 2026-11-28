@@ -173,6 +173,54 @@ uninstall() {
   warn "已保留配置 $CONFIG_DIR 与数据 $DATA_DIR；如需彻底清除请手动删除。"
 }
 
+# --- privileged helpers --------------------------------------------------
+# The console runs with NoNewPrivileges=true, so sudo cannot escalate from inside
+# its sandbox (by design). Privileged work therefore goes through root-owned
+# helper scripts triggered by systemd path units. See docs/deploy.md.
+install_helpers() {
+  step "安装特权辅助程序"
+
+  install -d -m 0755 /usr/local/lib/neko-console/bin
+  install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" /var/lib/neko-console/helper
+
+  for helper in nginx-helper db-helper cert-helper; do
+    if [ -f "$SRC_DIR/deploy/$helper.sh" ]; then
+      install -m 0755 -o root -g root "$SRC_DIR/deploy/$helper.sh" "/usr/local/lib/neko-console/bin/$helper"
+      ok "安装 $helper"
+    fi
+  done
+
+  for unit in neko-nginx-helper neko-db-helper neko-cert-helper; do
+    if [ -f "$SRC_DIR/deploy/$unit.service" ]; then
+      install -m 0644 -o root -g root "$SRC_DIR/deploy/$unit.service" "/etc/systemd/system/$unit.service"
+      install -d -m 0755 "/etc/systemd/system/$unit.service.d"
+      cat > "/etc/systemd/system/$unit.service.d/ratelimit.conf" <<'RATELIMIT'
+[Unit]
+StartLimitIntervalSec=60
+StartLimitBurst=30
+RATELIMIT
+    fi
+    if [ -f "$SRC_DIR/deploy/$unit.path" ]; then
+      install -m 0644 -o root -g root "$SRC_DIR/deploy/$unit.path" "/etc/systemd/system/$unit.path"
+      systemctl enable --now "$unit.path" >/dev/null 2>&1 || warn "启用 $unit.path 失败"
+    fi
+  done
+
+  # nginx's managed directory and the shared ACME webroot.
+  if [ -d /etc/nginx ]; then
+    install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" /etc/nginx/neko-sites
+    install -d -m 0775 -o root -g "$SERVICE_USER" /etc/nginx/conf.d
+    ok "准备 nginx 托管目录"
+  else
+    warn "未检测到 nginx，网站功能不可用（apt install nginx 后可重新运行本脚本）"
+  fi
+  install -d -m 0755 /var/www/neko-acme/.well-known/acme-challenge
+  install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" /var/backups/neko-console
+  install -d -m 0755 /etc/neko-console/jobs
+
+  systemctl daemon-reload
+  ok "特权辅助程序就绪"
+}
 main() {
   require_root
   case "${1:-}" in
@@ -193,6 +241,7 @@ main() {
   build_frontend
   setup_config
   install_polkit
+  install_helpers
   install_unit
 
   local port
@@ -207,6 +256,8 @@ main() {
 
      配置文件:  ${CONFIG_DIR}/config.json
      数据目录:  ${DATA_DIR}/files
+     数据库:    ${DATA_DIR}/neko.sqlite
+     备份目录:  /var/backups/neko-console
      服务管理:  systemctl {status|restart|stop} ${SERVICE}
      查看日志:  journalctl -u ${SERVICE} -f
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Neko-console helper trigger (nginx)
+Documentation=https://github.com/baizi51676-source/Neko-console
+
+[Path]
+# systemd watches this file and starts the helper unit as root when it changes.
+#
+# This is how the privileged work happens without polkit and without sudo:
+#   - any user may write the request file (it is just a word)
+#   - systemd, not the console, decides to run the helper
+#   - the helper runs as root but only understands three literal words
+#   - the console's own NoNewPrivileges sandbox stays intact
+#
+# polkit 0.105 (Ubuntu 22.04) cannot express per-unit rules and setuid is ignored
+# on shell scripts, so a path unit is the portable way to do this.
+PathModified=/var/lib/neko-console/helper/nginx-request
+Unit=neko-nginx-helper.service
+
+[Install]
+WantedBy=multi-user.target

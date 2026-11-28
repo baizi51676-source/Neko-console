@@ -1,0 +1,14 @@
+[Unit]
+Description=Neko-console privileged helper (database)
+Documentation=https://github.com/baizi51676-source/Neko-console
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/neko-console/bin/db-helper
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/neko-console/helper /run/mysqld /var/backups/neko-console

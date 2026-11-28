@@ -1,0 +1,27 @@
+/*
+ * Neko-console polkit rule (pkla format).
+ *
+ * Ubuntu 22.04 ships polkit 0.105, which predates JavaScript rules — only
+ * `.pkla` files are read. This file is the 0.105 equivalent of
+ * deploy/polkit-neko.rules; install whichever matches the host's polkit version
+ * (0.106+ uses the .rules file).
+ *
+ * Scope: the `neko` service user may only start the two helper units. Any other
+ * unit or verb is denied, so a compromised console cannot restart sshd or stop
+ * the firewall.
+ *
+ * Install: /etc/polkit-1/localauthority/50-local.d/49-neko-console.pkla
+ */
+[Allow nginx helper]
+Identity=unix-user:neko
+Action=org.freedesktop.systemd1.manage-units
+ResultAny=no
+ResultInactive=no
+ResultActive=yes
+
+[Allow nginx helper explicit units]
+Identity=unix-user:neko
+Action=org.freedesktop.systemd1.manage-units
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes

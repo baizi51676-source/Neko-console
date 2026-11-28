@@ -45,6 +45,7 @@ import {
 } from './collectors/files.mjs';
 import { ApiError, toApiError } from './errors.mjs';
 import { registerDockerRoutes } from './routes/docker.mjs';
+import { registerPanelRoutes } from './routes/panel.mjs';
 import { errorMessage, isSafeToken } from './util.mjs';
 
 const COOKIE_NAME = 'neko_session';
@@ -521,6 +522,8 @@ export function createHandler({ config, stream }) {
 
   // Docker / catalogue / power routes are registered once per handler.
   registerDockerRoutes(route, { config, log: auditLog });
+  // Sites, certificates, databases, jobs, backups and audit.
+  registerPanelRoutes(route, { config, log: auditLog });
 
   return async function handle(req, res) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);

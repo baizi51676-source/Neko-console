@@ -1,0 +1,46 @@
+// polkit rule: allow the `neko` service user to run the privileged helpers.
+//
+// Scoped deliberately narrow:
+//   - only manage-units, and only for the two helper units by name
+//   - only the start verb (each helper service is oneshot and exits immediately)
+//   - nothing else on the system
+//
+// The helpers themselves take their action from a systemd Environment=, so even
+// a fully compromised console can choose only from the whitelist compiled into
+// the root-owned helper script — never an arbitrary command.
+//
+// Install to /etc/polkit-1/rules.d/49-neko-console.rules and reload polkit.
+// Delete this file to make the panel read-only.
+polkit.addRule(function (action, subject) {
+  if (subject.user != "neko") return;
+
+  if (action.id != "org.freedesktop.systemd1.manage-units") return;
+
+  var unit = action.lookup("unit");
+
+  // Two helpers: nginx config work, and certificate issuance.
+  var allowed = [
+    "neko-nginx-helper.service",
+    "neko-cert-helper.service"
+  ];
+  if (allowed.indexOf(unit) == -1) return;
+
+  var verb = action.lookup("verb");
+  if (verb != "start") return;
+
+  return polkit.Result.YES;
+});
+
+// The console still needs to control its own service and a small set of units
+// (used by the existing Services page).
+polkit.addRule(function (action, subject) {
+  if (subject.user != "neko") return;
+
+  if (action.id != "org.freedesktop.systemd1.manage-units") return;
+
+  var verb = action.lookup("verb");
+  var verbs = ["start", "stop", "restart", "reload"];
+  if (verb && verbs.indexOf(verb) == -1) return;
+
+  return polkit.Result.YES;
+});

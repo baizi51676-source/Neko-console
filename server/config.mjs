@@ -13,6 +13,7 @@
  * @property {string} sessionSecret
  * @property {number} sessionTtl
  * @property {string} fileRoot
+ * @property {string} databaseFile
  * @property {string} staticRoot
  * @property {number} loginMaxAttempts
  * @property {number} loginWindow
@@ -73,6 +74,10 @@ export function loadConfig() {
     sessionTtl: envNumber('NEKO_SESSION_TTL', file.sessionTtl ?? 12 * 60 * 60),
     fileRoot: resolve(process.env.NEKO_FILE_ROOT ?? file.fileRoot ?? join(homedir(), 'neko-files')),
     staticRoot: resolve(process.env.NEKO_STATIC_ROOT ?? file.staticRoot ?? join(process.cwd(), 'dist')),
+    
+    databaseFile: resolve(
+      process.env.NEKO_DB_FILE ?? file.databaseFile ?? join(homedir(), '.neko-console', 'neko.sqlite'),
+    ),
     loginMaxAttempts: envNumber('NEKO_LOGIN_MAX', file.loginMaxAttempts ?? 8),
     loginWindow: envNumber('NEKO_LOGIN_WINDOW', file.loginWindow ?? 15 * 60),
     enableTerminal: envBool('NEKO_TERMINAL', file.enableTerminal ?? true),

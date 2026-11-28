@@ -1,0 +1,20 @@
+[Unit]
+Description=Neko-console privileged helper (nginx)
+Documentation=https://github.com/baizi51676-source/Neko-console
+# Started by neko-nginx-helper.path whenever the console writes a request.
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+User=root
+Group=root
+
+# Runs the root-owned helper, which reads the one-word action from a file the
+# console may write and whitelists it. No argument is user-controlled.
+ExecStart=/usr/local/lib/neko-console/bin/nginx-helper
+
+# The helper needs to write nginx logs/pid and signal the master.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/etc/nginx /var/log/nginx /run /var/lib/neko-console/helper

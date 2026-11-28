@@ -1,0 +1,15 @@
+[Unit]
+Description=Neko-console privileged helper (certificates)
+Documentation=https://github.com/baizi51676-source/Neko-console
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/neko-console/bin/cert-helper
+TimeoutStartSec=300
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/etc/letsencrypt /var/www/neko-acme /var/lib/neko-console/helper /var/log/letsencrypt

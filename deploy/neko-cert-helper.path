@@ -1,0 +1,10 @@
+[Unit]
+Description=Neko-console helper trigger (certificates)
+Documentation=https://github.com/baizi51676-source/Neko-console
+
+[Path]
+PathModified=/var/lib/neko-console/helper/cert-request.json
+Unit=neko-cert-helper.service
+
+[Install]
+WantedBy=multi-user.target

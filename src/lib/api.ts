@@ -563,3 +563,148 @@ Object.assign(dockerApi, {
   updateRestartPolicy: (name: string, policy: string) =>
     post<{ ok: boolean; policy: string }>('/api/docker/container/restart-policy', { name, policy }),
 });
+/* ------------------------------------------------------------------ */
+/* panel: sites / certificates / databases / jobs / backups            */
+/* ------------------------------------------------------------------ */
+
+export interface SiteRow {
+  id: string;
+  name: string;
+  kind: 'static' | 'proxy';
+  server_names: string;
+  upstream: string | null;
+  root_path: string | null;
+  indexed: number;
+  ssl: number;
+  cert_name: string | null;
+  created_at: string;
+  updated_at: string;
+  rendered?: boolean;
+}
+
+export interface NginxStatus {
+  available: boolean;
+  version: string;
+  running: boolean;
+  managedDir: string;
+  wired: boolean;
+}
+
+export interface CertificateRow {
+  lineage: string;
+  path: string;
+  subject: string;
+  altNames: string[];
+  expiresAt: string;
+  issuedAt: string | null;
+  daysLeft: number;
+  expiringSoon: boolean;
+  expired: boolean;
+}
+
+export interface CertificateHealth {
+  certificates: CertificateRow[];
+  total: number;
+  expiringCount: number;
+  expiredCount: number;
+  warnDays: number;
+  timer: { installed: boolean; enabled: boolean; next: string | null };
+}
+
+export interface DbEngine {
+  id: string;
+  label: string;
+  available: boolean;
+  version?: string | null;
+  hint: string | null;
+}
+
+export interface JobRow {
+  id: number;
+  name: string;
+  schedule: string;
+  command: string;
+  kind: string;
+  enabled: number;
+  last_run: string | null;
+  last_status: string | null;
+  created_at: string;
+  runs?: JobRun[];
+}
+
+export interface JobRun {
+  id: number;
+  job_id: number;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  output: string | null;
+}
+
+export interface BackupRow {
+  id: number;
+  kind: 'database' | 'site';
+  label: string;
+  path: string;
+  size: number;
+  sha256: string | null;
+  created_at: string;
+}
+
+export interface AuditRow {
+  id: number;
+  at: string;
+  action: string;
+  target: string | null;
+  detail: string | null;
+  result: string;
+}
+
+export interface PanelStatus {
+  nginx: NginxStatus;
+  certificates: CertificateHealth;
+  databases: DbEngine[];
+  sites: number;
+  actions: { name: string; description: string }[];
+}
+
+export const panelApi = {
+  status: () => get<PanelStatus>('/api/panel/status'),
+
+  sites: () => get<{ sites: SiteRow[]; managedFiles: { name: string; path: string; size: number }[] }>('/api/sites'),
+  sitePreview: (id: string) => get<{ config: string }>(`/api/sites/preview?id=${encodeURIComponent(id)}`),
+  siteTest: () => get<{ ok: boolean; output: string }>('/api/sites/test'),
+  bootstrapSites: () => post<{ created: boolean; dir: string; include: string }>('/api/sites/bootstrap'),
+  createSite: (payload: Record<string, unknown>) => post<{ site: SiteRow }>('/api/sites', payload),
+  updateSite: (payload: Record<string, unknown>) => post<{ site: SiteRow }>('/api/sites/update', payload),
+  deleteSite: (id: string) => post<{ deleted: boolean }>('/api/sites/delete', { id }),
+
+  certificates: () => get<CertificateHealth>('/api/certificates'),
+  issueCertificate: (domains: string[]) => post<CertificateRow & { output: string }>('/api/certificates/issue', { domains }),
+  renewCertificate: (lineage: string) => post<{ ok: boolean; output: string }>('/api/certificates/renew', { lineage }),
+  installCertTimer: () => post<{ service: string; timer: string }>('/api/certificates/timer'),
+
+  engines: () => get<{ engines: DbEngine[] }>('/api/databases/engines'),
+  listDatabases: (engine: string) =>
+    get<{ engine: string; databases: string[] }>(`/api/databases/list?engine=${encodeURIComponent(engine)}`),
+  createDatabase: (payload: Record<string, unknown>) =>
+    post<{ engine: string; database: string; username: string; password: string }>('/api/databases/create', payload),
+  dropDatabase: (payload: Record<string, unknown>) => post<{ dropped: boolean }>('/api/databases/drop', payload),
+
+  jobs: () => get<{ jobs: JobRow[]; actions: { name: string; description: string }[]; scripts: string[] }>('/api/jobs'),
+  createJob: (payload: Record<string, unknown>) => post<{ job: JobRow }>('/api/jobs', payload),
+  updateJob: (payload: Record<string, unknown>) => post<{ job: JobRow }>('/api/jobs/update', payload),
+  deleteJob: (id: number) => post<{ deleted: boolean }>('/api/jobs/delete', { id }),
+  runJob: (id: number) => post<{ ok: boolean; output?: string; error?: string }>('/api/jobs/run', { id }),
+
+  backups: () => get<{ entries: BackupRow[]; totalSize: number; keep: number; dir: string }>('/api/backups'),
+  runBackup: (payload: Record<string, unknown>) =>
+    post<{ files?: { kind: string; label: string; size: number }[]; totalSize?: number; path?: string; size?: number; sha256?: string }>(
+      '/api/backups/run',
+      payload,
+    ),
+  verifyBackup: (path: string) => post<{ ok: boolean; expected?: string; actual?: string; reason?: string }>('/api/backups/verify', { path }),
+  pruneBackups: () => post<{ removed: string[] }>('/api/backups/prune'),
+
+  audit: (limit = 100) => get<{ entries: AuditRow[] }>(`/api/audit?limit=${limit}`),
+};

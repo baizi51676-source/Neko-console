@@ -15,8 +15,12 @@ import { lazy, type ComponentType, type LazyExoticComponent } from 'react';
 import {
   Activity,
   Boxes,
+  Clock,
+  Database,
   FileText,
   FolderTree,
+  Globe,
+  HardDrive,
   LayoutDashboard,
   PackagePlus,
   Settings2,
@@ -84,6 +88,45 @@ export const NAV: NavGroup[] = [
         icon: PackagePlus,
         primary: true,
         component: page(() => import('@/pages/install')),
+      },
+    ],
+  },
+  {
+    group: '站点',
+    items: [
+      {
+        id: 'sites',
+        label: '网站',
+        description: '反向代理与静态站点，含 SSL 证书签发与续期巡检。',
+        icon: Globe,
+        primary: true,
+        component: page(() => import('@/pages/sites')),
+      },
+    ],
+  },
+  {
+    group: '数据',
+    items: [
+      {
+        id: 'databases',
+        label: '数据库',
+        description: '创建与删除 MySQL / PostgreSQL 数据库和账号。',
+        icon: Database,
+        component: page(() => import('@/pages/databases')),
+      },
+      {
+        id: 'backups',
+        label: '备份',
+        description: '数据库逻辑备份与站点打包，带 SHA-256 校验。',
+        icon: HardDrive,
+        component: page(() => import('@/pages/backups')),
+      },
+      {
+        id: 'jobs',
+        label: '计划任务',
+        description: '定时执行内置动作或白名单脚本，记录每次结果。',
+        icon: Clock,
+        component: page(() => import('@/pages/jobs')),
       },
     ],
   },

@@ -1,0 +1,38 @@
+# Neko-console sudo rules
+#
+# The console runs as an unprivileged user but must perform a few root-only
+# operations: validating/reloading nginx, requesting certificates, and managing
+# databases.
+#
+# Every rule names the exact binary and is deliberately narrow:
+#   - no wildcards on the command path
+#   - no shell interpreters (`sh -c`, `bash -c`) — those would re-introduce
+#     shell injection through the console's own arguments
+#   - NOPASSWD is required because the service has no TTY
+#
+# Install: cp deploy/sudoers /etc/sudoers.d/neko-console && chmod 440 ...
+# Verified with `visudo -c`.
+
+# --- nginx -------------------------------------------------------------
+# `nginx -t` needs root to open the error log and write /run/nginx.pid.
+neko ALL=(root) NOPASSWD: /usr/sbin/nginx -t
+neko ALL=(root) NOPASSWD: /usr/sbin/nginx -s reload
+neko ALL=(root) NOPASSWD: /bin/systemctl reload nginx
+
+# --- certificates ------------------------------------------------------
+# certbot must write /etc/letsencrypt and the ACME webroot.
+neko ALL=(root) NOPASSWD: /usr/bin/certbot certonly *
+neko ALL=(root) NOPASSWD: /usr/bin/certbot renew *
+neko ALL=(root) NOPASSWD: /bin/systemctl enable --now neko-cert-renew.timer
+neko ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
+
+# --- databases ---------------------------------------------------------
+# Root authentication for MySQL is usually socket-based, so the client itself
+# must run as root. The argument list is constrained by the console's own
+# validation (identifiers only, values SQL-escaped).
+neko ALL=(root) NOPASSWD: /usr/bin/mysql
+neko ALL=(root) NOPASSWD: /usr/bin/mysqldump *
+neko ALL=(root) NOPASSWD: /usr/bin/psql
+neko ALL=(root) NOPASSWD: /usr/bin/pg_dump *
+neko ALL=(postgres) NOPASSWD: /usr/bin/psql *
+neko ALL=(postgres) NOPASSWD: /usr/bin/pg_dump *
