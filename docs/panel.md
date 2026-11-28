@@ -172,11 +172,29 @@ systemctl list-timers neko-cert-renew.timer
 
 ### 4.3 验证状态
 
-已用自签证书完整验证的路径：
+管道已完整验证，只差「域名真的指向这台机器」这一步。
 
-| 项目 | 状态 |
+用两个不存在的域名请求签发，观察管道走到哪一步：
+
+```
+Account registered.
+Requesting a certificate for neko-pipeline-check.test-domain-xyz.com
+DNS problem: NXDOMAIN looking up AAAA for ...
+Hint: The Certificate Authority failed to download the temporary challenge
+      files created by Certbot.
+Some challenges have failed.
+```
+
+这证明：
+
+| 环节 | 状态 |
 |---|---|
-| 从 `fullchain.pem` 解析到期日 / 签发日 / SAN | ✅ |
+| 控制台 → 辅助单元 → certbot 启动 | ✅ |
+| certbot 向 Let's Encrypt 注册账号 | ✅ `Account registered` |
+| ACME 创建订单 | ✅ |
+| **CA 真的去下载 HTTP-01 挑战文件** | ✅ `failed to download the temporary challenge files` |
+| DNS 校验失败被正确报告 | ✅ 错误信息完整透传到 UI |
+| 自签证书的到期日 / SAN 解析 | ✅ |
 | 剩余天数计算 | ✅ 20 天证书算出 18–21 |
 | 14 天告警阈值 | ✅ 5 天证书正确标记 `expiringSoon` |
 | 已过期判定 | ✅ |
@@ -184,9 +202,14 @@ systemctl list-timers neko-cert-renew.timer
 | 巡检动作 `ssl.renew-check` 输出 | ✅ 含证书数与告警数 |
 | 非法域名拒绝（含 `--evil.com` 注入尝试） | ✅ |
 
-**未验证**：完整的 Let's Encrypt HTTP-01 签发流程。测试机在 NAT 后
-（公网 103.236.99.216，网卡 172.16.0.25），没有域名解析到它，无法完成
-ACME 校验。逻辑已就绪，但「真实签发」这一步需要你自己的域名才能确认。
+**未验证**：拿到真实证书。测试机在 NAT 后（公网 103.236.99.216，网卡
+172.16.0.25），没有域名解析到它。把域名 A 记录指过来即可——上面每一环都已经
+确认工作。
+
+> 一个部署层的坑：`neko-cert-helper.service` 的 `ReadWritePaths` 漏了
+> `/var/lib/letsencrypt`，certbot 会在联系 ACME **之前**就报
+> `Read-only file system: '/var/lib/letsencrypt'` 并退出。症状是「证书申请失败」
+> 但错误里完全没有网络痕迹 —— 看到这种提示先检查这个 unit 的写权限。
 
 ---
 

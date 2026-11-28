@@ -12,4 +12,11 @@ TimeoutStartSec=300
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/etc/letsencrypt /var/www/neko-acme /var/lib/neko-console/helper /var/log/letsencrypt
+# certbot writes four locations, and missing any one of them makes it abort with
+# "Read-only file system" before it ever contacts the ACME server:
+#   /etc/letsencrypt      certificates and account keys
+#   /var/lib/letsencrypt  its working directory
+#   /var/log/letsencrypt  debug log
+#   /var/www/neko-acme    the HTTP-01 challenge webroot
+ReadWritePaths=/etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt \
+               /var/www/neko-acme /var/lib/neko-console/helper /run
