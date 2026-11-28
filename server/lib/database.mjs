@@ -28,8 +28,11 @@ const DB_RESULT = `${HELPER_DIR}/db-result.json`;
 /**
  * Send one request to the privileged helper and wait for its answer.
  *
- * @param {'create'|'drop'|'list'|'ping'} op
- * @param {{ database?: string, username?: string, password?: string }} params
+ * `engine` selects the client the helper invokes; both MySQL and PostgreSQL go
+ * through the same path because both need root/postgres to authenticate locally.
+ *
+ * @param {'create'|'drop'|'list'|'ping'|'dump'} op
+ * @param {{ engine?: 'mysql'|'postgres', database?: string, username?: string, password?: string }} params
  * @returns {Promise<Record<string, unknown>>}
  */
 export async function callHelper(op, params = {}) {
@@ -37,7 +40,7 @@ export async function callHelper(op, params = {}) {
 
   // The nonce makes a repeated identical request register as a file change, so
   // systemd re-fires the path unit.
-  const payload = JSON.stringify({ op, ...params, nonce: Date.now() });
+  const payload = JSON.stringify({ op, engine: params.engine ?? 'mysql', ...params, nonce: Date.now() });
   await writeAtomic(DB_REQUEST, payload, { mode: 0o644 });
 
   const deadline = Date.now() + 60000;
@@ -81,38 +84,34 @@ async function recoverHelper() {
 /**
  * Detect which engines are usable.
  *
- * A client binary is not enough — the server must accept a connection, otherwise
- * every operation surfaces a cryptic socket error.
+ * A client binary is not enough — the server must also accept a connection,
+ * otherwise every operation surfaces a cryptic socket error. Both probes go
+ * through the helper, which is the only path that can authenticate locally.
  */
 export async function detectEngines() {
   const engines = [];
 
-  if (hasBinary('mysql') || hasBinary('mysql', '/usr/bin')) {
+  for (const [id, label, binary] of [
+    ['mysql', 'MySQL / MariaDB', 'mysql'],
+    ['postgres', 'PostgreSQL', 'psql'],
+  ]) {
+    if (!hasBinary(binary) && !existsSync(`/usr/bin/${binary}`)) continue;
+
     let available = false;
     let version = null;
     try {
-      const result = await callHelper('ping');
+      const result = await callHelper('ping', { engine: id });
       available = true;
-      version = String(result.version ?? '').trim();
+      version = String(result.version ?? '').trim().slice(0, 40);
     } catch {
       available = false;
     }
     engines.push({
-      id: 'mysql',
-      label: 'MySQL / MariaDB',
+      id,
+      label,
       available,
       version,
-      hint: available ? null : '无法连接 MySQL（需要 root 权限，请安装数据库辅助单元）',
-    });
-  }
-
-  if (hasBinary('psql')) {
-    const probe = await tryRun('sudo', ['-n', '-u', 'postgres', 'psql', '-tAc', 'SELECT 1'], { timeout: 8000 });
-    engines.push({
-      id: 'postgres',
-      label: 'PostgreSQL',
-      available: probe !== null,
-      hint: probe === null ? '需要 postgres 用户的免密执行权限' : null,
+      hint: available ? null : `${label} 无法连接（需要特权辅助单元，见 docs/panel.md）`,
     });
   }
 
@@ -194,72 +193,42 @@ export async function listMysqlDatabases() {
 /**
  * Create a PostgreSQL database and its owning role.
  *
- * PostgreSQL has no auth_socket equivalent, so this uses the `postgres` OS user
- * through a narrowly scoped sudo rule (deploy/sudoers). It is only attempted when
- * that rule exists.
+ * Goes through the same privileged helper as MySQL. PostgreSQL's local socket
+ * uses peer authentication, so only the `postgres` OS account can connect as
+ * superuser — and the console's sandbox blocks `sudo`, so an in-process
+ * `sudo -u postgres` simply does not work here (it prompts for a password).
+ *
+ * @param {{ database: string, username: string, password?: string }} params
  */
 export async function createPostgres({ database, username, password }) {
   const db = checkIdentifier(database, '数据库名');
   const user = checkIdentifier(username, '用户名');
   const secret = password || generatePassword();
 
-  const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
-
-  const role = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'psql', '-tAc', `SELECT 1 FROM pg_roles WHERE rolname = ${quote(user)}`],
-    { timeout: 20000 },
-  );
-  if (role === null) {
-    throw new ApiError('DOCKER_NO_PERMISSION', '无法以 postgres 用户运行 psql（缺少 sudo 规则）');
-  }
-
-  const roleSql = role.trim() === '1'
-    ? `ALTER ROLE "${user}" WITH LOGIN PASSWORD ${quote(secret)}`
-    : `CREATE ROLE "${user}" LOGIN PASSWORD ${quote(secret)}`;
-  const roleResult = await tryRun('sudo', ['-n', '-u', 'postgres', 'psql', '-c', roleSql], { timeout: 20000 });
-  if (roleResult === null) throw new ApiError('DOCKER_ACTION_FAILED', '创建或更新角色失败');
-
-  // CREATE DATABASE cannot run inside a transaction block, so it is its own call.
-  const dbResult = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'psql', '-c', `CREATE DATABASE "${db}" OWNER "${user}"`],
-    { timeout: 20000 },
-  );
-  if (dbResult === null) throw new ApiError('DOCKER_ACTION_FAILED', '创建数据库失败（可能已存在）');
-
-  return { engine: 'postgres', database: db, username: user, password: secret, owner: user };
+  const result = await callHelper('create', { engine: 'postgres', database: db, username: user, password: secret });
+  return {
+    engine: 'postgres',
+    database: db,
+    username: user,
+    password: secret,
+    owner: user,
+    message: result.message,
+  };
 }
 
 export async function dropPostgres({ database, username, force }) {
   if (force !== true) throw new ApiError('VALIDATION_FAILED', '删除操作需要二次确认（force=true）');
   const db = checkIdentifier(database, '数据库名');
+  const user = username ? checkIdentifier(username, '用户名') : null;
 
-  const dropped = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'psql', '-c', `DROP DATABASE IF EXISTS "${db}"`],
-    { timeout: 20000 },
-  );
-  if (dropped === null) throw new ApiError('DOCKER_ACTION_FAILED', '删除数据库失败');
-
-  if (!username) return { engine: 'postgres', database: db, dropped: true };
-
-  const user = checkIdentifier(username, '用户名');
-  const droppedRole = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'psql', '-c', `DROP ROLE IF EXISTS "${user}"`],
-    { timeout: 20000 },
-  );
-  if (droppedRole === null) {
-    return {
-      engine: 'postgres',
-      database: db,
-      dropped: true,
-      roleDropped: false,
-      note: '角色仍拥有其他对象，未删除',
-    };
-  }
-  return { engine: 'postgres', database: db, username: user, dropped: true, roleDropped: true };
+  const result = await callHelper('drop', { engine: 'postgres', database: db, username: user ?? '' });
+  return {
+    engine: 'postgres',
+    database: db,
+    username: user ?? undefined,
+    dropped: true,
+    ...(result.roleDropped === false ? { roleDropped: false, note: String(result.note ?? '角色未删除') } : {}),
+  };
 }
 
 /**
@@ -273,7 +242,7 @@ export async function dropPostgres({ database, username, force }) {
  */
 export async function dumpMysqlViaHelper(database) {
   const db = checkIdentifier(database, '数据库名');
-  const result = await callHelper('dump', { database: db });
+  const result = await callHelper('dump', { engine: 'mysql', database: db });
   return {
     path: String(result.path ?? ''),
     size: Number(result.size ?? 0),
@@ -282,14 +251,8 @@ export async function dumpMysqlViaHelper(database) {
 }
 
 export async function listPostgresDatabases() {
-  const output = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'psql', '-tAc',
-      "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'"],
-    { timeout: 20000 },
-  );
-  if (output === null) return [];
-  return output.split('\n').map((line) => line.trim()).filter(Boolean);
+  const result = await callHelper('list', { engine: 'postgres' });
+  return Array.isArray(result.databases) ? result.databases.map(String) : [];
 }
 
 /** Engine-agnostic dispatch used by the route. */

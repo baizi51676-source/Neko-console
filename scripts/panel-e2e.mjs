@@ -122,6 +122,61 @@ async function main() {
   res = await post('/api/databases/drop', { engine: 'mysql', database: 'testdb' });
   check('删除需要二次确认', res.json?.code === 'VALIDATION_FAILED', res.json?.code);
 
+
+  /* ---------------- PostgreSQL (same lifecycle, different engine) ---------------- */
+
+  console.log('\n=== M2 PostgreSQL ===');
+  res = await post('/api/databases/create', { engine: 'postgres', database: 'bad-name!', username: 'u' });
+  check('postgres 拒绝非法库名', res.json?.ok === false);
+
+  const pgCreate = await post('/api/databases/create', {
+    engine: 'postgres',
+    database: 'e2epg',
+    username: 'e2epgu',
+  });
+  const pgOk = pgCreate.json?.ok === true;
+  check('postgres 建库', pgOk, pgCreate.text.slice(0, 160));
+
+  if (pgOk) {
+    // The generated role must reach its own database and nothing else. This is
+    // the check that caught the PUBLIC-CONNECT hole.
+    const pw = pgCreate.json.data.password;
+    const { execFileSync } = await import('node:child_process');
+    let ownOk = false;
+    try {
+      execFileSync('bash', ['-c', `PGPASSWORD='${pw}' psql -h 127.0.0.1 -U e2epgu -d e2epg -tAc 'SELECT 1'`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      ownOk = true;
+    } catch {
+      ownOk = false;
+    }
+    check('postgres 角色可连自己的库', ownOk);
+
+    let crossBlocked = true;
+    try {
+      execFileSync('bash', ['-c', `PGPASSWORD='${pw}' psql -h 127.0.0.1 -U e2epgu -d postgres -tAc 'SELECT 1'`], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      crossBlocked = false;
+    } catch {
+      crossBlocked = true;
+    }
+    check('postgres 角色无法跨库访问', crossBlocked);
+
+    const pgDropNoForce = await post('/api/databases/drop', { engine: 'postgres', database: 'e2epg' });
+    check('postgres 删除需二次确认', pgDropNoForce.json?.code === 'VALIDATION_FAILED');
+
+    const pgDrop = await post('/api/databases/drop', {
+      engine: 'postgres',
+      database: 'e2epg',
+      username: 'e2epgu',
+      force: true,
+    });
+    check('postgres 删除成功', pgDrop.json?.ok === true, pgDrop.text.slice(0, 160));
+  }
   console.log('\n=== M4 计划任务 ===');
   res = await post('/api/jobs', { name: 'e2e-cert', schedule: 'every:3600', command: 'action.ssl.renew-check', kind: 'actions' });
   check('创建任务', res.status === 200 && res.json?.ok === true, res.text.slice(0, 200));

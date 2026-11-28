@@ -90,30 +90,32 @@ export async function backupMysql(database) {
   };
 }
 
-/** Same for PostgreSQL. `--no-owner` makes the dump restorable by any role. */
+/** Same for PostgreSQL, through the same privileged helper. */
 export async function backupPostgres(database) {
   if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(database)) {
     throw new ApiError('VALIDATION_BAD_NAME', '无效的数据库名');
   }
   await ensureBackupDir();
 
-  const plain = join(BACKUP_DIR, `postgres-${database}-${stamp()}.sql`);
-  const dumped = await tryRun(
-    'sudo',
-    ['-n', '-u', 'postgres', 'pg_dump', '--no-owner', '--clean', '--if-exists', '-f', plain, database],
-    { timeout: DUMP_TIMEOUT_MS },
-  );
-  if (dumped === null) throw new ApiError('DOCKER_ACTION_FAILED', 'pg_dump 执行失败');
+  const { callHelper } = await import('./database.mjs');
+  const result = await callHelper('dump', { engine: 'postgres', database });
 
-  const zipped = await tryRun('gzip', ['-f', plain], { timeout: DUMP_TIMEOUT_MS });
-  if (zipped === null) throw new ApiError('DOCKER_ACTION_FAILED', 'gzip 压缩失败');
+  recordBackup({
+    kind: 'database',
+    label: `postgres:${database}`,
+    path: String(result.path ?? ''),
+    size: Number(result.size ?? 0),
+    sha256: String(result.sha256 ?? ''),
+  });
 
-  const path = `${plain}.gz`;
-  const info = await stat(path);
-  const sha256 = await hashFile(path);
-  recordBackup({ kind: 'database', label: `postgres:${database}`, path, size: info.size, sha256 });
-
-  return { kind: 'database', label: `postgres:${database}`, path, size: info.size, sha256, createdAt: now() };
+  return {
+    kind: 'database',
+    label: `postgres:${database}`,
+    path: String(result.path ?? ''),
+    size: Number(result.size ?? 0),
+    sha256: String(result.sha256 ?? ''),
+    createdAt: now(),
+  };
 }
 
 /** Resolve how to authenticate mysqldump, mirroring the database module. */
@@ -171,13 +173,19 @@ export async function backupSite({ label, path: sourcePath, excludes = [] }) {
  */
 export async function discoverDatabases() {
   const found = [];
-  try {
-    const { listMysqlDatabases } = await import('./database.mjs');
-    for (const database of await listMysqlDatabases()) {
-      found.push({ engine: 'mysql', database });
+  const { listMysqlDatabases, listPostgresDatabases } = await import('./database.mjs');
+
+  for (const [engine, list] of [
+    ['mysql', listMysqlDatabases],
+    ['postgres', listPostgresDatabases],
+  ]) {
+    try {
+      for (const database of await list()) {
+        found.push({ engine, database });
+      }
+    } catch {
+      // Engine absent or helper not installed; the rest of the backup still runs.
     }
-  } catch {
-    // MySQL absent or helper not installed; the site half of the backup still runs.
   }
   return found;
 }
@@ -189,9 +197,11 @@ export async function runFullBackup() {
 
   for (const entry of await discoverDatabases()) {
     try {
-      files.push(await backupMysql(entry.database));
+      files.push(entry.engine === 'postgres'
+        ? await backupPostgres(entry.database)
+        : await backupMysql(entry.database));
     } catch (error) {
-      failures.push(`mysql:${entry.database}: ${error.message}`);
+      failures.push(`${entry.engine}:${entry.database}: ${error.message}`);
     }
   }
 
