@@ -11,16 +11,27 @@ import { join } from 'node:path';
 import { tryRun, run, isSafeToken } from '../util.mjs';
 import { buildComposeFile, buildRunArgs } from './catalog.mjs';
 import { ApiError, classifyDockerFailure } from '../errors.mjs';
+import { runStreaming } from './jobs.mjs';
 
 /** Where generated compose projects live. */
 export const STACK_ROOT = process.env.NEKO_STACK_ROOT ?? '/var/lib/neko-console/stacks';
 
-/** Pull an image, returning the CLI output so failures are actionable. */
-export async function pullImage(image) {
+/**
+ * Pull an image, streaming layer progress into the log.
+ *
+ * `docker pull` writes progress with carriage returns, which `runStreaming`
+ * splits so the client sees movement instead of a frozen spinner.
+ *
+ * @param {string} image
+ * @param {(message: string, level?: string) => void} [log]
+ */
+export async function pullImage(image, log = () => {}) {
   if (!/^[A-Za-z0-9._/:@-]{1,255}$/.test(image)) throw new ApiError('VALIDATION_BAD_IMAGE', '无效的镜像名');
-  const out = await tryRun('docker', ['pull', image], { timeout: 600000, maxBuffer: 16 * 1024 * 1024 });
-  if (out === null) throw new ApiError('DOCKER_IMAGE_UNAVAILABLE', `拉取镜像失败: ${image}`);
-  return out.split('\n').filter(Boolean).slice(-6).join('\n');
+  log(`拉取镜像 ${image}（首次可能需要几分钟）`);
+  const result = await runStreaming('docker', ['pull', image], log, { timeout: 900000 });
+  if (!result.ok) throw classifyDockerFailure(result.output);
+  log('镜像就绪', 'success');
+  return result.output.split('\n').filter(Boolean).slice(-6).join('\n');
 }
 
 /**
@@ -43,7 +54,7 @@ async function ensureDirs(spec) {
  * Deploy with `docker run`.
  * @param {object} spec normalised spec from normalizeSpec()
  */
-export async function deployRun(spec) {
+export async function deployRun(spec, log = () => {}) {
   await ensureDirs(spec);
 
   // Refuse to shadow an existing container name rather than failing inside the
@@ -53,9 +64,10 @@ export async function deployRun(spec) {
     throw new ApiError('DOCKER_NAME_TAKEN', `容器名 ${spec.name} 已存在，请换一个名字或先删除旧容器`);
   }
 
-  const pullOutput = await pullImage(spec.image);
+  const pullOutput = await pullImage(spec.image, log);
 
   const args = buildRunArgs(spec);
+  log(`执行: docker ${args.join(' ')}`);
   const created = await runCapture('docker', args);
   if (!created.ok) {
     // Classify like the compose path does: a busy port must not surface as a
@@ -70,7 +82,8 @@ export async function deployRun(spec) {
     image: spec.image,
     command: `docker ${args.join(' ')}`,
     pullOutput,
-    containerId: created.trim().slice(0, 12),
+    // `runCapture` returns `{ ok, output }`; the container id is the first line.
+    containerId: String(created.output ?? '').trim().split('\n')[0].slice(0, 12),
   };
 }
 
@@ -126,7 +139,7 @@ async function composeUp(file, projectName) {
   return runCapture('docker', null, 300000, ['compose', '-f', file, '-p', projectName, 'up', '-d']);
 }
 
-export async function deployCompose(spec, projectName = spec.name) {
+export async function deployCompose(spec, projectName = spec.name, log = () => {}) {
   if (!isSafeToken(projectName, /^[a-z0-9][a-z0-9_.-]{0,62}$/)) throw new ApiError('VALIDATION_BAD_NAME', '无效的项目名');
   await ensureDirs(spec);
 
@@ -144,7 +157,8 @@ export async function deployCompose(spec, projectName = spec.name) {
   }
 
   await writeFile(file, content, 'utf8');
-  const pullOutput = await pullImage(spec.image);
+  log(`已生成 compose 文件: ${file}`);
+  const pullOutput = await pullImage(spec.image, log);
 
   const up = await composeUp(file, projectName);
   if (!up.ok) {

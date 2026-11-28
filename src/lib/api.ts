@@ -384,6 +384,8 @@ export interface AppTemplate {
 }
 
 export interface DeployResult {
+  /** Present on the immediate response; the job streams the real outcome. */
+  jobId?: string;
   mode: 'run' | 'compose';
   name: string;
   image: string;
@@ -427,6 +429,30 @@ export const dockerApi = {
   projects: () => get<{ projects: { name: string; file: string }[] }>('/api/docker/projects'),
   project: (name: string) => get<{ name: string; file: string; yaml: string }>(`/api/docker/project?name=${encodeURIComponent(name)}`),
   saveProject: (name: string, yaml: string) => post<{ ok: boolean; file: string }>('/api/docker/project', { name, yaml }),
+  /* ---- deployment jobs ---- */
+
+  job: (id: string, since = 0) => get<DeployJob>(`/api/docker/job?id=${encodeURIComponent(id)}&since=${since}`),
+  jobs: () => get<{ jobs: DeployJobSummary[] }>('/api/docker/jobs'),
+  cancelJob: (id: string) => post<{ cancelled: boolean }>('/api/docker/job/cancel', { id }),
+
+  /* ---- repository discovery ---- */
+
+  search: (query: string, limit = 12) =>
+    get<{ results: RepoResult[]; query: string }>(`/api/docker/search?q=${encodeURIComponent(query)}&limit=${limit}`),
+  analyze: (url: string, ref?: string) => post<RepoAnalysis>('/api/docker/analyze', { url, ref }),
+  readme: (repo: string) =>
+    get<{ summary: string; raw: string; path: string | null }>(`/api/docker/readme?repo=${encodeURIComponent(repo)}`),
+
+  /* ---- container reconfiguration ---- */
+
+  containerConfig: (name: string) =>
+    get<{ config: ContainerConfig; usedPorts: { port: number; owner: string }[] }>(
+      `/api/docker/container/config?name=${encodeURIComponent(name)}`,
+    ),
+  updatePorts: (name: string, ports: { host: number | null; container: number; protocol: string }[]) =>
+    post<{ jobId: string }>('/api/docker/container/ports', { name, ports }),
+  updateRestartPolicy: (name: string, policy: string) =>
+    post<{ ok: boolean; policy: string }>('/api/docker/container/restart-policy', { name, policy }),
 };
 
 export const powerApi = {
@@ -435,3 +461,105 @@ export const powerApi = {
     post<PowerSchedule>('/api/power', { action, password }),
   cancel: (token: string) => post<{ cancelled: boolean }>('/api/power/cancel', { token }),
 };
+/* ------------------------------------------------------------------ */
+/* deployment jobs                                                     */
+/* ------------------------------------------------------------------ */
+
+export interface DeployJobLogLine {
+  seq: number;
+  level: 'info' | 'stream' | 'success' | 'warn' | 'error' | string;
+  message: string;
+  at: number;
+}
+
+export interface DeployJobSummary {
+  id: string;
+  name: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  createdAt: number;
+  finishedAt: number | null;
+  error: string | null;
+  errorCode: string | null;
+  lines: number;
+}
+
+export interface DeployJob extends DeployJobSummary {
+  log: DeployJobLogLine[];
+  lastSeq: number;
+  result: (DeployResult & Record<string, unknown>) | null;
+}
+
+/** A repository discovered by live search. */
+export interface RepoResult {
+  id: string;
+  name: string;
+  fullName: string;
+  repo: string;
+  description: string;
+  stars: number;
+  topics: string[];
+  updatedAt: string;
+  htmlUrl: string;
+  license: string | null;
+  source: 'github';
+}
+
+/** Result of analysing an arbitrary repository. */
+export interface RepoAnalysis {
+  kind: 'compose' | 'dockerfile' | 'unknown';
+  repo: string;
+  ref: string;
+  path?: string;
+  meta: {
+    name?: string;
+    description?: string | null;
+    defaultBranch?: string;
+    stars?: number | null;
+    license?: string | null;
+    archived?: boolean;
+    htmlUrl?: string;
+    warning?: string;
+  };
+  image: string | null;
+  ports: TemplatePort[];
+  env: Record<string, string>;
+  description: string;
+  readme: string;
+  compose?: string;
+  dockerfile?: string;
+  serviceName?: string;
+  note?: string;
+  composeSource?: string;
+}
+
+/** Mutable container config used by the port editor. */
+export interface ContainerConfig {
+  name: string;
+  image: string;
+  ports: { host: number | null; container: number; protocol: string; hostIp: string | null }[];
+  env: { key: string; value: string }[];
+  mounts: { type: string; source: string; destination: string; readOnly: boolean }[];
+  restartPolicy: string;
+  networkMode: string;
+  state: string;
+}
+
+Object.assign(dockerApi, {
+  search: (query: string, limit = 12) =>
+    get<{ results: RepoResult[]; query: string }>(`/api/docker/search?q=${encodeURIComponent(query)}&limit=${limit}`),
+  analyze: (url: string, ref?: string) =>
+    post<RepoAnalysis>('/api/docker/analyze', { url, ref }),
+  readme: (repo: string) =>
+    get<{ summary: string; raw: string; path: string | null }>(`/api/docker/readme?repo=${encodeURIComponent(repo)}`),
+  job: (id: string, since = 0) => get<DeployJob>(`/api/docker/job?id=${encodeURIComponent(id)}&since=${since}`),
+  jobs: () => get<{ jobs: DeployJobSummary[] }>('/api/docker/jobs'),
+  cancelJob: (id: string) => post<{ cancelled: boolean }>('/api/docker/job/cancel', { id }),
+  containerConfig: (name: string) =>
+    get<{ config: ContainerConfig; usedPorts: { port: number; owner: string }[] }>(
+      `/api/docker/container/config?name=${encodeURIComponent(name)}`,
+    ),
+  updatePorts: (name: string, ports: { host: number | null; container: number; protocol: string }[]) =>
+    post<{ jobId: string }>('/api/docker/container/ports', { name, ports }),
+  updateRestartPolicy: (name: string, policy: string) =>
+    post<{ ok: boolean; policy: string }>('/api/docker/container/restart-policy', { name, policy }),
+});

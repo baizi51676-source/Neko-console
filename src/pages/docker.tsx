@@ -14,6 +14,7 @@ import {
   RefreshCw,
   RotateCcw,
   ScrollText,
+  SlidersHorizontal,
   Square,
   Trash2,
 } from 'lucide-react';
@@ -24,6 +25,7 @@ import { Badge, Button, Card } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/field';
+import { PortEditor } from '@/components/ui/port-editor';
 import { useApiError } from '@/components/layout/session';
 import { useToast } from '@/components/ui/toast';
 
@@ -41,6 +43,7 @@ export default function DockerPage() {
   const [logLoading, setLogLoading] = useState(false);
   const [detail, setDetail] = useState<Container | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Container | null>(null);
+  const [portTarget, setPortTarget] = useState<Container | null>(null);
 
   const toMessage = useApiError();
   const { notify } = useToast();
@@ -471,9 +474,31 @@ export default function DockerPage() {
             ) : null}
 
             {detail.command ? <Field label="启动命令" value={detail.command} mono /> : null}
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-1 w-fit"
+              disabled={Boolean(detail.composeProject)}
+              title={detail.composeProject ? 'Compose 管理的容器请通过项目文件修改端口' : '修改端口映射'}
+              onClick={() => {
+                const target = detail;
+                setDetail(null);
+                setPortTarget(target);
+              }}
+            >
+              <SlidersHorizontal className="size-3.5" /> 编辑端口映射
+            </Button>
           </div>
         ) : null}
       </Dialog>
+
+      <PortEditor
+        name={portTarget?.name ?? null}
+        open={portTarget !== null}
+        onClose={() => setPortTarget(null)}
+        onDone={() => void load()}
+      />
 
       {/* delete confirm */}
       <Dialog

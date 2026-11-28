@@ -203,6 +203,32 @@ async function main() {
     res = await call('/api/docker/action', { method: 'POST', body: JSON.stringify({ name: 'x; rm -rf /', action: 'stop' }) });
     check('拒绝命令注入的容器名', res.status >= 400 || res.json?.ok === false);
 
+
+    console.log('\n部署任务与仓库分析');
+    res = await call('/api/docker/deploy', { method: 'POST', body: JSON.stringify({ mode: 'run', spec: { name: 'job-test', image: 'nginx:alpine' } }) });
+    check('部署立即返回 jobId（不阻塞）', res.json?.ok === true && typeof res.json?.data?.jobId === 'string', `got ${JSON.stringify(res.json?.data)}`);
+    const jobId = res.json?.data?.jobId;
+    if (jobId) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      res = await call(`/api/docker/job?id=${jobId}`);
+      check('任务可查询', res.json?.ok === true && res.json?.data?.id === jobId);
+      check('任务有日志', Array.isArray(res.json?.data?.log) && res.json.data.log.length > 0);
+      check('任务有终态或运行中', ['running', 'failed', 'succeeded', 'queued'].includes(res.json?.data?.state));
+      res = await call('/api/docker/jobs');
+      check('jobs 列表包含该任务', res.json?.data?.jobs?.some((job) => job.id === jobId));
+    }
+
+    res = await call('/api/docker/analyze', { method: 'POST', body: JSON.stringify({ url: 'ftp://nope/x' }) });
+    check('拒绝非 GitHub 地址', res.json?.ok === false && res.json?.code === 'VALIDATION_FAILED', `got ${res.json?.code}`);
+
+    res = await call('/api/docker/container/config?name=no-such-container-xyz');
+    check('未知容器返回错误码', res.json?.ok === false && typeof res.json?.code === 'string');
+
+    res = await call('/api/docker/container/restart-policy', { method: 'POST', body: JSON.stringify({ name: 'x', policy: 'bogus' }) });
+    check('拒绝非法重启策略', res.json?.ok === false);
+
+    res = await call('/api/docker/container/ports', { method: 'POST', body: JSON.stringify({ name: 'no-such', ports: [{ host: 1, container: 2 }] }) });
+    check('端口修改接受请求并返回 jobId', res.json?.ok === true && typeof res.json?.data?.jobId === 'string', `got ${JSON.stringify(res.json?.data)}`);
     console.log('\n错误码');
     res = await call('/api/docker/action', { method: 'POST', body: JSON.stringify({ name: 'x; rm -rf /', action: 'stop' }) });
     check('非法容器名返回 VALIDATION_BAD_NAME', res.json?.code === 'VALIDATION_BAD_NAME', `got ${res.json?.code}`);

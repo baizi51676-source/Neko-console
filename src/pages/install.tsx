@@ -5,26 +5,37 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   Check,
+  GitBranch,
+  ExternalLink,
   FileCode2,
   Globe,
   Loader2,
   Package,
   Rocket,
   Search,
+  Sparkles,
+  Star,
   Terminal,
 } from 'lucide-react';
-import { dockerApi, type AppTemplate, type DeployResult, type RegistrySource } from '@/lib/api';
+import {
+  dockerApi,
+  type AppTemplate,
+  type DeployJob,
+  type RegistrySource,
+  type RepoAnalysis,
+  type RepoResult,
+} from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { Badge, Button, Card } from '@/components/ui/button';
 import { Field as FormField, Input } from '@/components/ui/field';
 import { Dialog } from '@/components/ui/dialog';
-import { EmptyState } from '@/components/ui/empty-state';
+import { DeployJobsBanner, DeployLog } from '@/components/ui/deploy-log';
 import { useApiError } from '@/components/layout/session';
 import { useToast } from '@/components/ui/toast';
 
 type Mode = 'run' | 'compose';
+type Tab = 'builtin' | 'search' | 'custom';
 
-/** Editable projection of a template, so the form can diverge from defaults. */
 interface Draft {
   name: string;
   image: string;
@@ -38,14 +49,28 @@ export default function InstallPage() {
   const [templates, setTemplates] = useState<AppTemplate[]>([]);
   const [sources, setSources] = useState<RegistrySource[]>([]);
   const [source, setSource] = useState('github');
+  const [tab, setTab] = useState<Tab>('builtin');
+  const [loading, setLoading] = useState(true);
+
+  // catalogue search
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('全部');
-  const [selected, setSelected] = useState<AppTemplate | null>(null);
+  const [remoteQuery, setRemoteQuery] = useState('');
+  const [remoteResults, setRemoteResults] = useState<RepoResult[]>([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+
+  // custom install
+  const [customUrl, setCustomUrl] = useState('');
+  const [analysis, setAnalysis] = useState<RepoAnalysis | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+
+  // deploy dialog
+  const [selected, setSelected] = useState<{ title: string; description?: string; templateId?: string } | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [mode, setMode] = useState<Mode>('run');
-  const [deploying, setDeploying] = useState(false);
-  const [result, setResult] = useState<DeployResult | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
 
   const toMessage = useApiError();
   const { notify } = useToast();
@@ -64,7 +89,7 @@ export default function InstallPage() {
 
   const categories = useMemo(() => ['全部', ...new Set(templates.map((template) => template.category))], [templates]);
 
-  const visible = useMemo(() => {
+  const visibleTemplates = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return templates.filter((template) => {
       if (category !== '全部' && template.category !== category) return false;
@@ -77,10 +102,10 @@ export default function InstallPage() {
     });
   }, [templates, query, category]);
 
-  /** Open the configure dialog, seeding the draft from the template defaults. */
+  /** Seed a draft from a built-in template. */
   const openTemplate = useCallback((template: AppTemplate) => {
-    setSelected(template);
-    setResult(null);
+    setSelected({ title: `部署 ${template.name}`, description: template.description, templateId: template.id });
+    setJobId(null);
     setMode('run');
     setDraft({
       name: template.id,
@@ -90,13 +115,39 @@ export default function InstallPage() {
         container: String(port.container),
         protocol: port.protocol ?? 'tcp',
       })),
-      volumes: template.volumes.map((volume) => ({ host: volume.host, container: volume.container, readOnly: Boolean(volume.readOnly) })),
-      // Generate a random value for required secrets so the deploy succeeds
-      // without the user having to invent one — it is shown in the result.
+      volumes: template.volumes.map((volume) => ({
+        host: volume.host,
+        container: volume.container,
+        readOnly: Boolean(volume.readOnly),
+      })),
       env: template.env.map((variable) => ({
         key: variable.key,
         value: variable.secret && !variable.default ? generateSecret() : variable.default ?? '',
       })),
+      restart: 'unless-stopped',
+    });
+  }, []);
+
+  /** Seed a draft from an analysed repository. */
+  const openAnalysis = useCallback((result: RepoAnalysis) => {
+    const shortName = result.repo.split('/')[1]?.toLowerCase().replace(/[^a-z0-9_.-]/g, '') || 'app';
+    setSelected({
+      title: `部署 ${result.meta.name ?? shortName}`,
+      description: result.description || undefined,
+    });
+    setJobId(null);
+    // A repo with a compose file is best deployed as compose; a plain image as run.
+    setMode(result.kind === 'compose' ? 'compose' : 'run');
+    setDraft({
+      name: shortName,
+      image: result.image ?? '',
+      ports: result.ports.map((port) => ({
+        host: String(port.host),
+        container: String(port.container),
+        protocol: port.protocol ?? 'tcp',
+      })),
+      volumes: [],
+      env: Object.entries(result.env).map(([key, value]) => ({ key, value })),
       restart: 'unless-stopped',
     });
   }, []);
@@ -107,36 +158,85 @@ export default function InstallPage() {
     return src?.imagePrefix ? `${src.imagePrefix}${draft.image}` : draft.image;
   }, [draft, source, sources]);
 
-  const deploy = async () => {
-    if (!draft || !selected) return;
-    setDeploying(true);
-    setResult(null);
+  const runRemoteSearch = async () => {
+    if (!remoteQuery.trim()) return;
+    setRemoteLoading(true);
+    setRemoteError(null);
+    try {
+      const result = await dockerApi.search(remoteQuery.trim(), 12);
+      setRemoteResults(result.results);
+      if (result.results.length === 0) setRemoteError('没有找到匹配的仓库');
+    } catch (error) {
+      setRemoteError(toMessage(error));
+      setRemoteResults([]);
+    } finally {
+      setRemoteLoading(false);
+    }
+  };
+
+  const analyze = async (url: string) => {
+    if (!url.trim()) return;
+    setAnalyzing(true);
+    setRemoteError(null);
+    try {
+      const result = await dockerApi.analyze(url.trim());
+      setAnalysis(result);
+      notify(
+        result.kind === 'compose'
+          ? '已找到 docker-compose.yml，端口与环境变量已自动填充'
+          : result.kind === 'dockerfile'
+            ? '找到 Dockerfile，但需要你填写镜像名'
+            : '未能自动识别部署方式，请手动填写',
+        result.kind === 'unknown' ? 'error' : 'success',
+      );
+    } catch (error) {
+      setAnalysis(null);
+      notify(toMessage(error), 'error');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const startDeploy = async () => {
+    if (!draft) return;
+    setStarting(true);
     try {
       const payload = {
         mode,
         source,
-        templateId: selected.id,
+        templateId: selected?.templateId,
         projectName: mode === 'compose' ? draft.name : undefined,
         spec: {
           name: draft.name,
           image: draft.image,
           ports: draft.ports
-            .filter((port) => port.host && port.container)
-            .map((port) => ({ host: Number(port.host), container: Number(port.container), protocol: port.protocol })),
+            .filter((port) => port.container)
+            .map((port) => ({
+              host: Number(port.host) || null,
+              container: Number(port.container),
+              protocol: port.protocol,
+            })),
           volumes: draft.volumes.filter((volume) => volume.container),
           env: Object.fromEntries(draft.env.filter((entry) => entry.key).map((entry) => [entry.key, entry.value])),
           restart: draft.restart,
         },
       };
-      const deployed = await dockerApi.deploy(payload);
-      setResult(deployed);
-      notify(`${draft.name} 部署成功`, 'success');
+      const result = await dockerApi.deploy(payload);
+      if (result.jobId) setJobId(result.jobId);
     } catch (error) {
       notify(toMessage(error), 'error');
     } finally {
-      setDeploying(false);
+      setStarting(false);
     }
   };
+
+  const onJobDone = useCallback(
+    (job: DeployJob) => {
+      if (job.state === 'succeeded') notify(`${job.name} 部署成功`, 'success');
+      else if (job.state === 'failed') notify(job.error ?? '部署失败', 'error');
+    },
+    [notify],
+  );
 
   if (loading) {
     return (
@@ -150,6 +250,8 @@ export default function InstallPage() {
 
   return (
     <>
+      <DeployJobsBanner onOpen={(id) => setJobId(id)} />
+
       {/* source selector */}
       <Card className="p-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -158,9 +260,7 @@ export default function InstallPage() {
           </span>
           <div className="min-w-0">
             <div className="text-[13px] font-semibold">镜像源</div>
-            <div className="text-[11px] text-muted-foreground">
-              国内网络可切换镜像加速，模板元数据始终指向上游项目
-            </div>
+            <div className="text-[11px] text-muted-foreground">国内网络可切换镜像加速，模板元数据始终指向上游项目</div>
           </div>
           <div className="flex flex-1 flex-wrap items-center justify-end gap-1.5">
             {sources.map((entry) => (
@@ -183,43 +283,73 @@ export default function InstallPage() {
         </div>
       </Card>
 
-      {/* filters */}
       <Card className="overflow-hidden">
+        {/* tabs */}
         <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2.5">
-          <span className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索应用"
-              className="h-8 w-[200px] pl-8 text-[11.5px]"
-              aria-label="搜索应用"
-            />
-          </span>
-          <div className="flex flex-wrap items-center gap-1">
-            {categories.map((entry) => (
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-0.5">
+            {(
+              [
+                ['builtin', `内置应用 ${templates.length}`],
+                ['search', '联网搜索'],
+                ['custom', 'GitHub 仓库'],
+              ] as const
+            ).map(([key, label]) => (
               <button
-                key={entry}
+                key={key}
                 type="button"
-                onClick={() => setCategory(entry)}
+                onClick={() => setTab(key)}
                 className={cn(
-                  'rounded-md px-2 py-1 text-[11px] transition-colors',
-                  category === entry ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
+                  'relative rounded-md px-2.5 py-1 text-[11.5px] transition-colors',
+                  tab === key ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
                 )}
               >
-                {entry}
+                {tab === key ? (
+                  <motion.span
+                    layoutId="install-tab"
+                    className="absolute inset-0 rounded-md bg-card shadow-xs"
+                    transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                  />
+                ) : null}
+                <span className="relative">{label}</span>
               </button>
             ))}
           </div>
+
+          {tab === 'builtin' ? (
+            <>
+              <span className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="筛选应用"
+                  className="h-8 w-[160px] pl-8 text-[11.5px]"
+                  aria-label="筛选应用"
+                />
+              </span>
+              <div className="flex flex-wrap items-center gap-1">
+                {categories.map((entry) => (
+                  <button
+                    key={entry}
+                    type="button"
+                    onClick={() => setCategory(entry)}
+                    className={cn(
+                      'rounded-md px-2 py-1 text-[11px] transition-colors',
+                      category === entry ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    {entry}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
         </div>
 
-        {visible.length === 0 ? (
-          <div className="p-4">
-            <EmptyState icon={Package} title="没有匹配的应用" description="换个关键词或分类试试。" />
-          </div>
-        ) : (
+        {/* --- built-in --- */}
+        {tab === 'builtin' ? (
           <div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-3">
-            {visible.map((template) => (
+            {visibleTemplates.map((template) => (
               <motion.button
                 key={template.id}
                 type="button"
@@ -241,57 +371,230 @@ export default function InstallPage() {
                 <code className="truncate rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                   {template.image}
                 </code>
-                <div className="flex items-center gap-1 text-[10.5px] text-muted-foreground">
-                  {template.ports.length > 0 ? (
-                    <span className="truncate">端口 {template.ports.map((port) => port.host).join(', ')}</span>
-                  ) : (
-                    <span>无对外端口</span>
-                  )}
-                  {template.note ? <Badge tone="warning">注意</Badge> : null}
-                </div>
+                {template.note ? <Badge tone="warning">注意</Badge> : null}
               </motion.button>
             ))}
           </div>
-        )}
+        ) : null}
+
+        {/* --- live search --- */}
+        {tab === 'search' ? (
+          <div className="p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="relative flex-1 min-w-[220px]">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={remoteQuery}
+                  onChange={(event) => setRemoteQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void runRemoteSearch();
+                  }}
+                  placeholder="搜索 GitHub 上的自托管项目，例如 immich、vaultwarden"
+                  className="h-9 pl-8 text-[12px]"
+                  aria-label="搜索 GitHub 项目"
+                />
+              </span>
+              <Button size="md" disabled={remoteLoading || !remoteQuery.trim()} onClick={() => void runRemoteSearch()}>
+                {remoteLoading ? <Loader2 className="size-3.5 animate-spin" /> : <Search className="size-3.5" />}
+                搜索
+              </Button>
+            </div>
+            <p className="mt-2 text-[10.5px] leading-relaxed text-muted-foreground">
+              结果按 star 排序，优先返回带有 compose 或 Dockerfile 的项目。点击后会读取仓库的
+              docker-compose.yml 自动填充端口与环境变量。
+            </p>
+
+            {remoteError ? (
+              <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[11.5px] text-warning">
+                {remoteError}
+              </div>
+            ) : null}
+
+            {remoteLoading ? (
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {[0, 1, 2, 3].map((index) => (
+                  <div key={index} className="sk-shimmer h-20 rounded-lg" />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {remoteResults.map((repo) => (
+                  <div key={repo.id} className="flex flex-col gap-1.5 rounded-lg border border-border p-3">
+                    <div className="flex items-center gap-2">
+                      <GitBranch className="size-3.5 shrink-0 text-primary" />
+                      <span className="truncate text-[12.5px] font-medium">{repo.fullName}</span>
+                      <span className="ml-auto flex shrink-0 items-center gap-0.5 text-[10.5px] text-muted-foreground">
+                        <Star className="size-3" /> {repo.stars.toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">
+                      {repo.description || '（无描述）'}
+                    </p>
+                    <div className="flex items-center gap-1">
+                      <a
+                        href={repo.htmlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[10.5px] text-muted-foreground hover:text-primary"
+                      >
+                        仓库 <ExternalLink className="size-2.5" />
+                      </a>
+                      <div className="flex-1" />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setCustomUrl(repo.htmlUrl);
+                          setTab('custom');
+                          void analyze(repo.htmlUrl);
+                        }}
+                      >
+                        分析部署
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
+
+        {/* --- custom repo --- */}
+        {tab === 'custom' ? (
+          <div className="flex flex-col gap-3 p-3">
+            <div className="flex flex-wrap items-end gap-2">
+              <FormField label="GitHub 仓库地址" className="flex-1 min-w-[260px]">
+                <Input
+                  value={customUrl}
+                  onChange={(event) => setCustomUrl(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void analyze(customUrl);
+                  }}
+                  placeholder="https://github.com/owner/repo 或 owner/repo"
+                />
+              </FormField>
+              <Button disabled={analyzing || !customUrl.trim()} onClick={() => void analyze(customUrl)}>
+                {analyzing ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                分析仓库
+              </Button>
+            </div>
+
+            <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+              支持粘贴完整的 GitHub 链接、带分支的链接，或简写 owner/repo。分析时会依次查找
+              docker-compose.yml、Dockerfile 与 README——找到 compose 文件即可一键部署。
+            </p>
+
+            {analyzing ? <div className="sk-shimmer h-40 rounded-lg" /> : null}
+
+            {analysis && !analyzing ? (
+              <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <GitBranch className="size-4 text-primary" />
+                  <span className="text-[13px] font-semibold">{analysis.meta.name ?? analysis.repo}</span>
+                  <Badge tone={analysis.kind === 'compose' ? 'success' : analysis.kind === 'dockerfile' ? 'warning' : 'muted'}>
+                    {analysis.kind === 'compose' ? '找到 compose' : analysis.kind === 'dockerfile' ? '仅 Dockerfile' : '未识别'}
+                  </Badge>
+                  {analysis.meta.stars !== null && analysis.meta.stars !== undefined ? (
+                    <span className="flex items-center gap-0.5 text-[10.5px] text-muted-foreground">
+                      <Star className="size-3" /> {analysis.meta.stars.toLocaleString()}
+                    </span>
+                  ) : null}
+                  {analysis.meta.license ? <Badge tone="muted">{analysis.meta.license}</Badge> : null}
+                  <div className="flex-1" />
+                  <a
+                    href={`https://github.com/${analysis.repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[10.5px] text-muted-foreground hover:text-primary"
+                  >
+                    仓库 <ExternalLink className="size-2.5" />
+                  </a>
+                </div>
+
+                {analysis.description ? (
+                  <div>
+                    <div className="mb-1 text-[10.5px] font-medium text-muted-foreground">项目描述</div>
+                    <p className="whitespace-pre-wrap text-[11.5px] leading-relaxed text-foreground/80">
+                      {analysis.description}
+                    </p>
+                  </div>
+                ) : null}
+
+                {analysis.readme ? (
+                  <details className="rounded-md border border-border/60 bg-muted/20 px-2.5 py-1.5">
+                    <summary className="cursor-pointer text-[10.5px] text-muted-foreground">
+                      来自 README 的说明
+                    </summary>
+                    <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+                      {analysis.readme}
+                    </p>
+                  </details>
+                ) : null}
+
+                <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                  <span>分支 {analysis.ref}</span>
+                  {analysis.image ? <span>镜像 {analysis.image}</span> : null}
+                  {analysis.ports.length > 0 ? <span>端口 {analysis.ports.map((p) => p.host).join(', ')}</span> : null}
+                  {Object.keys(analysis.env).length > 0 ? <span>{Object.keys(analysis.env).length} 个环境变量</span> : null}
+                </div>
+
+                {analysis.note ? (
+                  <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
+                    {analysis.note}
+                  </div>
+                ) : null}
+
+                <div className="flex flex-wrap gap-2">
+                  <Button onClick={() => openAnalysis(analysis)}>
+                    <Rocket className="size-3.5" /> 配置并部署
+                  </Button>
+                  {analysis.compose ? (
+                    <details className="w-full">
+                      <summary className="cursor-pointer text-[10.5px] text-muted-foreground">
+                        查看仓库的 docker-compose.yml
+                      </summary>
+                      <pre className="mt-1.5 max-h-48 overflow-auto rounded-md border border-border bg-muted/40 p-2 font-mono text-[10px]">
+                        {analysis.compose}
+                      </pre>
+                    </details>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </Card>
 
-      {/* configure + deploy */}
+      {/* deploy dialog */}
       <Dialog
         open={selected !== null}
         onClose={() => {
           setSelected(null);
-          setResult(null);
+          setJobId(null);
         }}
-        title={result ? '部署完成' : `部署 ${selected?.name ?? ''}`}
-        description={result ? undefined : selected?.description}
+        title={jobId ? '部署进度' : (selected?.title ?? '')}
+        description={jobId ? undefined : selected?.description}
         className="max-w-[720px]"
         footer={
-          result ? (
-            <Button onClick={() => { setSelected(null); setResult(null); }}>完成</Button>
+          jobId ? (
+            <Button onClick={() => { setSelected(null); setJobId(null); }}>完成</Button>
           ) : (
             <>
               <Button variant="outline" onClick={() => setSelected(null)}>
                 取消
               </Button>
-              <Button disabled={deploying} onClick={() => void deploy()}>
-                {deploying ? <Loader2 className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
-                {deploying ? '正在部署…' : '开始部署'}
+              <Button disabled={starting || !draft?.image} onClick={() => void startDeploy()}>
+                {starting ? <Loader2 className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
+                开始部署
               </Button>
             </>
           )
         }
       >
-        {result ? (
-          <DeployResultView result={result} />
+        {jobId ? (
+          <DeployLog jobId={jobId} onDone={onJobDone} />
         ) : draft ? (
           <div className="flex flex-col gap-4">
-            {selected?.note ? (
-              <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-[11.5px] leading-relaxed text-warning">
-                {selected.note}
-              </div>
-            ) : null}
-
-            {/* deployment mode */}
             <div>
               <div className="mb-1.5 text-[12px] font-medium text-foreground/85">部署方式</div>
               <div className="grid grid-cols-2 gap-2">
@@ -307,9 +610,7 @@ export default function InstallPage() {
                     onClick={() => setMode(value)}
                     className={cn(
                       'flex flex-col gap-1 rounded-lg border p-2.5 text-left transition-colors',
-                      mode === value
-                        ? 'border-[var(--accent-line)] bg-[var(--accent-soft)]'
-                        : 'border-border hover:bg-accent/50',
+                      mode === value ? 'border-[var(--accent-line)] bg-[var(--accent-soft)]' : 'border-border hover:bg-accent/50',
                     )}
                   >
                     <span className="flex items-center gap-1.5 text-[12px] font-medium">
@@ -326,8 +627,12 @@ export default function InstallPage() {
               <FormField label="容器名 / 项目名">
                 <Input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
               </FormField>
-              <FormField label="镜像" hint={`实际拉取：${previewImage}`}>
-                <Input value={draft.image} onChange={(event) => setDraft({ ...draft, image: event.target.value })} />
+              <FormField label="镜像" hint={previewImage ? `实际拉取：${previewImage}` : '请填写镜像名'}>
+                <Input
+                  value={draft.image}
+                  onChange={(event) => setDraft({ ...draft, image: event.target.value })}
+                  placeholder="nginx:alpine"
+                />
               </FormField>
             </div>
 
@@ -338,9 +643,7 @@ export default function InstallPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() =>
-                    setDraft({ ...draft, ports: [...draft.ports, { host: '', container: '', protocol: 'tcp' }] })
-                  }
+                  onClick={() => setDraft({ ...draft, ports: [...draft.ports, { host: '', container: '', protocol: 'tcp' }] })}
                 >
                   + 添加
                 </Button>
@@ -394,6 +697,9 @@ export default function InstallPage() {
                     </Button>
                   </div>
                 ))}
+                {draft.ports.length === 0 ? (
+                  <p className="text-[11px] text-muted-foreground">未配置端口映射，容器将仅在内部网络可达。</p>
+                ) : null}
               </div>
             </div>
 
@@ -404,12 +710,7 @@ export default function InstallPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() =>
-                    setDraft({
-                      ...draft,
-                      volumes: [...draft.volumes, { host: '', container: '', readOnly: false }],
-                    })
-                  }
+                  onClick={() => setDraft({ ...draft, volumes: [...draft.volumes, { host: '', container: '', readOnly: false }] })}
                 >
                   + 添加
                 </Button>
@@ -495,55 +796,6 @@ export default function InstallPage() {
         ) : null}
       </Dialog>
     </>
-  );
-}
-
-function DeployResultView({ result }: { result: DeployResult }) {
-  return (
-    <div className="flex flex-col gap-3 text-[12px]">
-      <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2">
-        <Check className="size-4 shrink-0 text-success" />
-        <span>
-          <strong>{result.name}</strong> 已通过 {result.mode === 'compose' ? 'docker compose' : 'docker run'} 启动
-        </span>
-      </div>
-      <InfoRow label="镜像" value={result.image} mono />
-      {result.containerId ? <InfoRow label="容器 ID" value={result.containerId} mono /> : null}
-      {result.file ? <InfoRow label="compose 文件" value={result.file} mono /> : null}
-      {result.command ? (
-        <div>
-          <div className="mb-1 text-[11px] text-muted-foreground">执行的命令</div>
-          <pre className="overflow-auto rounded-lg border border-border bg-muted/40 p-2 font-mono text-[10.5px]">
-            {result.command}
-          </pre>
-        </div>
-      ) : null}
-      {result.yaml ? (
-        <div>
-          <div className="mb-1 text-[11px] text-muted-foreground">生成的 compose 文件</div>
-          <pre className="max-h-40 overflow-auto rounded-lg border border-border bg-muted/40 p-2 font-mono text-[10.5px]">
-            {result.yaml}
-          </pre>
-        </div>
-      ) : null}
-      {result.output ? (
-        <div>
-          <div className="mb-1 text-[11px] text-muted-foreground">输出</div>
-          <pre className="max-h-32 overflow-auto rounded-lg border border-border bg-muted/40 p-2 font-mono text-[10.5px]">
-            {result.output}
-          </pre>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function InfoRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <div className="mb-0.5 text-[11px] text-muted-foreground">{label}</div>
-      <div className={cn('truncate rounded-md bg-muted/40 px-2 py-1.5', mono && 'font-mono text-[11px]')}>{value}</div>
-    </div>
   );
 }
 
